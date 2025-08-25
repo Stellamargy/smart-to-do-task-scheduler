@@ -41,7 +41,27 @@
         !(getTaskDescription  task_1) ; returns make
         !(getTaskTimeout task_1) ; returns 300
 
+
+        ;scheduling algorithm using depth first search (DFS)
+        ; The algorithm explores each task and its dependencies recursively, ensuring that all dependencies are resolved before scheduling a task.
+        ; The result is a list of tasks in the order they should be executed
+        ; Note: This is a simplified version and may need to be adapted for more complex scenarios
+
         ;(=(scheduleTasks ) (if))
+;         (= (dfs $node $visited $path)
+;    (if (member $node $visited)
+;        $path
+;        (let*
+;          (
+;            ($newVisited (cons $node $visited))
+;            ($newPath (cons $node $path))
+;            ($nbrs (neighbors $node))
+;            ($finalPath (dfs-neighbors $nbrs $newVisited $newPath))
+;          )
+;          $finalPath
+;        )
+;    )
+; )
 
 
 
@@ -63,4 +83,5 @@
 )
 !(AddTask (task_6 6  low  none  inProgress code 600))
 !(getTask task_6)
+
 
