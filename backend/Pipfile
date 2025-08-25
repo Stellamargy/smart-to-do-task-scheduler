@@ -6,6 +6,10 @@ name = "pypi"
 [packages]
 hyperon = "*"
 flask = "*"
+psycopg2-binary = "*"
+flask-sqlalchemy = "*"
+flask-migrate = "*"
+python-dotenv = "*"
 
 [dev-packages]
 
