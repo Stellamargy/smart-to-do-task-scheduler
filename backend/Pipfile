@@ -6,9 +6,9 @@ name = "pypi"
 [packages]
 hyperon = "*"
 flask = "*"
-sqlalchemy = "*"
-alembic = "*"
 psycopg2-binary = "*"
+flask-sqlalchemy = "*"
+flask-migrate = "*"
 
 [dev-packages]
 
