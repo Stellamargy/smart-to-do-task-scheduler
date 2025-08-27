@@ -13,8 +13,9 @@ class Task(db.Model):
     __tablename__ = "tasks"
     #table columns
     id = db.Column(db.Integer, primary_key=True)
+    title=db.Column(db.String, nullable=False, unique=True)
     task_description = db.Column(db.Text, nullable=False, unique=True)
-    deadline = db.Column(db.DateTime(timezone=True), nullable=False)
+    deadline = db.Column(db.Date, nullable=False)
     status = db.Column(db.String, nullable=False, default="incomplete")
     level_priority = db.Column(db.String, nullable=False)
 
@@ -27,7 +28,7 @@ class Task(db.Model):
         backref="dependents"
     )
     __table_args__ = (
-        CheckConstraint(status.in_(["Incomplete", "Completed"]), name="check_status"),
+        CheckConstraint(status.in_(["incomplete", "completed"]), name="check_status"),
         CheckConstraint(level_priority.in_(["Low", "Medium", "High"]), name="check_priority"),
     )
 
