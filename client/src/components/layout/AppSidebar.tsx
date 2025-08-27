@@ -1,14 +1,9 @@
 import { NavLink, useLocation } from "react-router-dom";
 import {
   Home,
-  CheckSquare,
-  Calendar,
-  GitBranch,
-  Bell,
-  Settings,
-  Plus
+  Settings
 } from "lucide-react";
-
+import { Network } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -21,14 +16,10 @@ import {
   SidebarFooter,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { Button } from "@/components/ui/button";
 
 const navigationItems = [
   { title: "Dashboard", url: "/", icon: Home },
-  { title: "Tasks", url: "/tasks", icon: CheckSquare },
-  { title: "Dependencies", url: "/dependencies", icon: GitBranch },
-  { title: "Calendar", url: "/calendar", icon: Calendar },
-  { title: "Notifications", url: "/notifications", icon: Bell },
+  { title: "Dependency Visualization", url: "/dependency-visualization", icon: Network },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
@@ -71,16 +62,6 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      
-      <SidebarFooter>
-        <Button 
-          className={`w-full ${collapsed ? 'px-2' : 'px-4'} bg-gradient-to-r from-primary to-primary-light hover:shadow-lg transition-all duration-200`}
-          size={collapsed ? "icon" : "default"}
-        >
-          <Plus className="h-4 w-4" />
-          {!collapsed && <span className="ml-2">Add Task</span>}
-        </Button>
-      </SidebarFooter>
     </Sidebar>
   );
 }

@@ -1,0 +1,13 @@
+flask==2.3.3
+flask-cors==4.0.0
+flask-jwt-extended==4.5.3
+pymongo==4.6.3
+python-dotenv==1.0.0
+bcrypt==4.0.1
+marshmallow==3.20.1
+mongoengine==0.27.0
+hyperon-das==0.1.1
+hyperon==0.1.12
+datetime
+requests==2.31.0
+pytz==2023.3

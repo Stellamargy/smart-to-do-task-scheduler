@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -21,20 +22,24 @@ import {
   Clock, 
   Shield, 
   Download,
-  Upload,
   Trash2,
-  Save
+  Save,
+  Loader2
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { authService, type User as UserType } from "@/services/auth";
 
 export default function Settings() {
   const { toast } = useToast();
   
+  const [user, setUser] = useState<UserType | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  
   const [profile, setProfile] = useState({
-    name: 'John Doe',
-    email: 'john.doe@example.com',
-    avatar: '',
-    bio: 'Productivity enthusiast and task management expert'
+    name: '',
+    email: '',
+    bio: ''
   });
 
   const [preferences, setPreferences] = useState({
@@ -66,11 +71,104 @@ export default function Settings() {
     autoBackup: true
   });
 
-  const handleSaveProfile = () => {
-    toast({
-      title: "Profile Updated",
-      description: "Your profile information has been saved successfully.",
-    });
+  // Load user data on component mount
+  useEffect(() => {
+    const loadUserData = async () => {
+      try {
+        // Always try to fetch fresh data from API first
+        const response = await authService.getProfile();
+        console.log('Profile API response:', response);
+        if (response.success && response.data) {
+          const userData = response.data.user;
+          console.log('User data from API:', userData);
+          setUser(userData);
+          setProfile({
+            name: userData.name || '',
+            email: userData.email || '',
+            bio: userData.bio || ''
+          });
+          console.log('Profile state set to:', {
+            name: userData.name || '',
+            email: userData.email || '',
+            bio: userData.bio || ''
+          });
+        } else {
+          // Fallback to cached user data
+          const currentUser = authService.getCurrentUser();
+          console.log('Cached user data:', currentUser);
+          if (currentUser) {
+            setUser(currentUser);
+            setProfile({
+              name: currentUser.name || '',
+              email: currentUser.email || '',
+              bio: currentUser.bio || ''
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load user data:', error);
+        // Try cached data as fallback
+        const currentUser = authService.getCurrentUser();
+        console.log('Fallback cached user data:', currentUser);
+        if (currentUser) {
+          setUser(currentUser);
+          setProfile({
+            name: currentUser.name || '',
+            email: currentUser.email || '',
+            bio: currentUser.bio || ''
+          });
+        }
+        toast({
+          title: "Warning",
+          description: "Using cached user data. Some information may be outdated.",
+          variant: "destructive"
+        });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadUserData();
+  }, [toast]);
+
+  const handleSaveProfile = async () => {
+    setSaving(true);
+    console.log('Saving profile data:', profile);
+    try {
+      const response = await authService.updateProfile(profile);
+      console.log('Profile update response:', response);
+      if (response.success) {
+        const updatedUser = response.data!.user;
+        console.log('Updated user data:', updatedUser);
+        setUser(updatedUser);
+        // Update profile state with the actual saved data from backend
+        setProfile({
+          name: updatedUser.name || '',
+          email: updatedUser.email || '',
+          bio: updatedUser.bio || ''
+        });
+        console.log('Profile state updated to:', {
+          name: updatedUser.name || '',
+          email: updatedUser.email || '',
+          bio: updatedUser.bio || ''
+        });
+        toast({
+          title: "Profile Updated",
+          description: "Your profile information has been saved successfully.",
+        });
+      } else {
+        throw new Error(response.error || 'Failed to update profile');
+      }
+    } catch (error) {
+      console.error('Profile update error:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update profile. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleSavePreferences = () => {
@@ -117,58 +215,82 @@ export default function Settings() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
-          <div className="flex items-center gap-6">
-            <Avatar className="h-20 w-20">
-              <AvatarImage src={profile.avatar} />
-              <AvatarFallback className="text-lg bg-gradient-to-br from-primary to-primary-light text-white">
-                {profile.name.split(' ').map(n => n[0]).join('')}
-              </AvatarFallback>
-            </Avatar>
-            <div className="space-y-2">
-              <Button variant="outline" size="sm">
-                <Upload className="h-4 w-4 mr-2" />
-                Upload Photo
+          {loading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-6">
+                <Avatar className="h-20 w-20">
+                  <AvatarFallback className="text-lg bg-gradient-to-br from-primary to-primary-light text-white">
+                    {profile.name ? profile.name.split(' ').map(n => n[0]).join('').toUpperCase() : 'U'}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="space-y-2">
+                  <div>
+                    <Label className="text-sm font-medium">Username</Label>
+                    <p className="text-sm text-muted-foreground">@{user?.username || 'N/A'}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="name">Full Name</Label>
+                  <Input
+                    id="name"
+                    value={profile.name}
+                    onChange={(e) => setProfile(prev => ({ ...prev, name: e.target.value }))}
+                    placeholder="Enter your full name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="email">Email Address</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    value={profile.email}
+                    onChange={(e) => setProfile(prev => ({ ...prev, email: e.target.value }))}
+                    placeholder="Enter your email"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="bio">Bio</Label>
+                <Textarea
+                  id="bio"
+                  placeholder="Tell us about yourself (max 500 characters)"
+                  value={profile.bio}
+                  onChange={(e) => setProfile(prev => ({ ...prev, bio: e.target.value }))}
+                  maxLength={500}
+                  rows={3}
+                />
+                <p className="text-xs text-muted-foreground text-right">
+                  {profile.bio.length}/500 characters
+                </p>
+              </div>
+
+              <Button 
+                onClick={handleSaveProfile} 
+                disabled={saving}
+                className="bg-gradient-to-r from-primary to-primary-light"
+              >
+                {saving ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-4 w-4 mr-2" />
+                    Save Profile
+                  </>
+                )}
               </Button>
-              <Button variant="ghost" size="sm" className="text-muted-foreground">
-                Remove Photo
-              </Button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="name">Full Name</Label>
-              <Input
-                id="name"
-                value={profile.name}
-                onChange={(e) => setProfile(prev => ({ ...prev, name: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="email">Email Address</Label>
-              <Input
-                id="email"
-                type="email"
-                value={profile.email}
-                onChange={(e) => setProfile(prev => ({ ...prev, email: e.target.value }))}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="bio">Bio</Label>
-            <Input
-              id="bio"
-              placeholder="Tell us about yourself"
-              value={profile.bio}
-              onChange={(e) => setProfile(prev => ({ ...prev, bio: e.target.value }))}
-            />
-          </div>
-
-          <Button onClick={handleSaveProfile} className="bg-gradient-to-r from-primary to-primary-light">
-            <Save className="h-4 w-4 mr-2" />
-            Save Profile
-          </Button>
+            </>
+          )}
         </CardContent>
       </Card>
 

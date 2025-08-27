@@ -1,20 +1,14 @@
 import { NavLink, useLocation } from "react-router-dom";
 import {
   Home,
-  CheckSquare,
-  Calendar,
-  GitBranch,
-  Bell,
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Network } from "lucide-react";
 
 const navigationItems = [
   { title: "Dashboard", url: "/", icon: Home },
-  { title: "Tasks", url: "/tasks", icon: CheckSquare },
-  { title: "Dependencies", url: "/dependencies", icon: GitBranch },
-  { title: "Calendar", url: "/calendar", icon: Calendar },
-  { title: "Notifications", url: "/notifications", icon: Bell },
+  { title: "Dependency", url: "/dependency-visualization", icon: Network },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
