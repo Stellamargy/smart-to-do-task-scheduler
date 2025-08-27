@@ -269,7 +269,8 @@ const DependencyVisualization: React.FC = () => {
             <CardHeader>
               <CardTitle>Dependency Chains Analysis</CardTitle>
               <CardDescription>
-                Complete dependency chains showing task sequences from first to last. Each chain shows tasks that must be completed in order.
+                Complete dependency chains showing task sequences from first to last. All tasks in active chains are shown regardless of filters. 
+                {filterStatus !== 'all' || filterPriority !== 'all' ? ' Tasks matching your filters are highlighted.' : ''}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -304,41 +305,50 @@ const DependencyVisualization: React.FC = () => {
                       </CardHeader>
                       <CardContent>
                         <div className="space-y-3">
-                          {chain.tasks.map((task, taskIndex) => (
-                            <div key={task.id} className="flex items-center gap-3">
-                              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50 flex-1">
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                  <span className="text-sm font-medium bg-primary text-primary-foreground rounded-full w-7 h-7 flex items-center justify-center">
-                                    {taskIndex + 1}
-                                  </span>
-                                  {getStatusIcon(task.status)}
-                                  <div className="min-w-0 flex-1">
-                                    <div className="font-medium truncate">{task.title}</div>
-                                    <div className="text-sm text-muted-foreground truncate">{task.description}</div>
+                          {chain.tasks.map((task, taskIndex) => {
+                            const matchesFilter = taskMatchesFilter(task);
+                            return (
+                              <div key={task.id} className="flex items-center gap-3">
+                                <div className={`flex items-center gap-3 p-3 rounded-lg flex-1 transition-all ${
+                                  matchesFilter 
+                                    ? 'bg-primary/10 border-2 border-primary/20' 
+                                    : filterStatus === 'all' && filterPriority === 'all'
+                                    ? 'bg-muted/50'
+                                    : 'bg-muted/20 opacity-60'
+                                }`}>
+                                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                                    <span className="text-sm font-medium bg-primary text-primary-foreground rounded-full w-7 h-7 flex items-center justify-center">
+                                      {taskIndex + 1}
+                                    </span>
+                                    {getStatusIcon(task.status)}
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-medium truncate">{task.title}</div>
+                                      <div className="text-sm text-muted-foreground truncate">{task.description}</div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <Badge variant="outline" className="text-xs">
+                                        P{task.priority}
+                                      </Badge>
+                                      <Badge 
+                                        variant={task.status === TaskStatus.COMPLETED ? 'default' : 
+                                                task.status === TaskStatus.IN_PROGRESS ? 'secondary' : 
+                                                task.status === TaskStatus.OVERDUE ? 'destructive' : 'outline'}
+                                        className="text-xs"
+                                      >
+                                        {task.status}
+                                      </Badge>
+                                    </div>
                                   </div>
-                                  <div className="flex items-center gap-2">
-                                    <Badge variant="outline" className="text-xs">
-                                      P{task.priority}
-                                    </Badge>
-                                    <Badge 
-                                      variant={task.status === TaskStatus.COMPLETED ? 'default' : 
-                                              task.status === TaskStatus.IN_PROGRESS ? 'secondary' : 
-                                              task.status === TaskStatus.OVERDUE ? 'destructive' : 'outline'}
-                                      className="text-xs"
-                                    >
-                                      {task.status}
-                                    </Badge>
+                                  <div className="text-sm text-muted-foreground">
+                                    {task.estimated_duration}h
                                   </div>
                                 </div>
-                                <div className="text-sm text-muted-foreground">
-                                  {task.estimated_duration}h
-                                </div>
+                                {taskIndex < chain.tasks.length - 1 && (
+                                  <ArrowRight className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                                )}
                               </div>
-                              {taskIndex < chain.tasks.length - 1 && (
-                                <ArrowRight className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                              )}
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </CardContent>
                     </Card>
@@ -346,8 +356,8 @@ const DependencyVisualization: React.FC = () => {
                 ) : (
                   <div className="text-center py-12 text-muted-foreground">
                     <GitBranch className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                    <p>No dependency chains found.</p>
-                    <p className="text-sm">Chains will appear here once task dependencies are created.</p>
+                    <p>No active dependency chains found.</p>
+                    <p className="text-sm">Chains will appear here when tasks have dependencies and are not yet completed.</p>
                   </div>
                 )}
               </div>
