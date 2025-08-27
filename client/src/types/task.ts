@@ -15,6 +15,8 @@ export interface Task {
   user: string;
   is_independent: boolean;
   is_overdue: boolean;
+  can_be_completed: boolean;
+  can_be_scheduled: boolean;
 }
 
 export interface TaskDetailedView extends Task {

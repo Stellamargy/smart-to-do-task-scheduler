@@ -107,6 +107,30 @@ class Task(Document):
             
         # Check only the immediate dependency status
         return self.dependency.status == TaskStatus.COMPLETED.value
+
+    def can_be_completed(self):
+        """
+        Check if task can be marked as completed.
+        
+        MeTTa Logic Rule: A task can only be completed if its immediate dependency 
+        (if any) is already completed. This prevents completing tasks out of order
+        in dependency chains.
+        
+        Example chain: 1 → 2 → 3 → 4 → 5
+        - Task 2 can only be completed after Task 1 is completed
+        - Task 3 can only be completed after Task 2 is completed
+        - Independent tasks can always be completed
+        """
+        # Independent tasks can always be completed
+        if self.is_independent():
+            return True
+        
+        # If task has no dependency (edge case), it can be completed
+        if self.dependency is None:
+            return True
+            
+        # Check only the immediate dependency status
+        return self.dependency.status == TaskStatus.COMPLETED.value
     
     def get_immediate_dependency(self):
         """Get the immediate dependency task (if any)"""
@@ -164,7 +188,9 @@ class Task(Document):
             'updated_at': self.updated_at.isoformat(),
             'user': str(self.user.id),
             'is_independent': self.is_independent(),
-            'is_overdue': self.is_overdue()
+            'is_overdue': self.is_overdue(),
+            'can_be_completed': self.can_be_completed(),
+            'can_be_scheduled': self.can_be_scheduled()
         }
     
     def to_metta_atom(self):

@@ -357,6 +357,22 @@ def update_task(task_id):
             if field != 'dependency':  # Already handled above
                 setattr(task, field, value)
         
+        # MeTTa Logic: Check if task can be completed when status is being set to completed
+        if 'status' in data and data['status'] == TaskStatus.COMPLETED.value:
+            if not task.can_be_completed():
+                dependency_title = task.dependency.title if task.dependency else "Unknown"
+                return jsonify({
+                    'error': 'Cannot complete task: dependency not completed',
+                    'message': f'Task "{task.title}" cannot be completed because its dependency "{dependency_title}" is not yet completed.',
+                    'details': {
+                        'task_id': str(task.id),
+                        'task_title': task.title,
+                        'dependency_id': str(task.dependency.id) if task.dependency else None,
+                        'dependency_title': dependency_title,
+                        'dependency_status': task.dependency.status if task.dependency else None
+                    }
+                }), 400
+        
         # Log when a task is being marked as completed
         if 'status' in data and data['status'] == TaskStatus.COMPLETED.value:
             print(f"✅ Task '{task.title}' marked as completed - will be excluded from future scheduling")

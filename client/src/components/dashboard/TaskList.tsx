@@ -154,14 +154,27 @@ const TaskItem = ({
           
           <div className="flex items-center gap-1">
             {task.status !== TaskStatus.COMPLETED && onCompleteTask && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onCompleteTask(task.id)}
-                className="h-8 w-8 p-0"
-              >
-                <CheckSquare className="h-4 w-4" />
-              </Button>
+              task.can_be_completed ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onCompleteTask(task.id)}
+                  className="h-8 w-8 p-0 text-green-600 hover:text-green-700"
+                  title="Mark as completed"
+                >
+                  <CheckSquare className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled
+                  className="h-8 w-8 p-0 text-gray-400 cursor-not-allowed"
+                  title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
+                >
+                  <CheckSquare className="h-4 w-4" />
+                </Button>
+              )
             )}
             
             <DropdownMenu>

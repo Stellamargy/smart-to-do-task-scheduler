@@ -22,11 +22,13 @@ import {
 import { Task, TaskStatus, TaskDetailedView } from "@/types/task";
 import { taskService } from "@/services/tasks";
 import { useTasks } from "@/hooks/useTasks";
+import { useToast } from "@/hooks/use-toast";
 
 export default function TaskDetail() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const { updateTask, deleteTask } = useTasks();
+  const { toast } = useToast();
   
   const [task, setTask] = useState<TaskDetailedView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,6 +60,17 @@ export default function TaskDetail() {
 
   const handleCompleteTask = async () => {
     if (!task) return;
+    
+    // Check if task can be completed (MeTTa logic validation)
+    if (!task.can_be_completed) {
+      toast({
+        title: "Cannot Complete Task",
+        description: `Task "${task.title}" cannot be completed because its dependency "${task.dependency_title || 'Unknown'}" is not yet completed.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    
     try {
       await updateTask(task.id, { status: TaskStatus.COMPLETED });
       await fetchTask(task.id); // Refresh task data
@@ -155,10 +168,22 @@ export default function TaskDetail() {
             </div>
           </div>
           <div className="flex gap-2">
-            {task.status !== TaskStatus.COMPLETED && (
+            {task.status !== TaskStatus.COMPLETED && task.can_be_completed && (
               <Button
                 onClick={handleCompleteTask}
                 className="flex items-center gap-2"
+                title="Mark as completed"
+              >
+                <CheckSquare2 className="h-4 w-4" />
+                Mark Complete
+              </Button>
+            )}
+            {task.status !== TaskStatus.COMPLETED && !task.can_be_completed && (
+              <Button
+                disabled
+                variant="outline"
+                className="flex items-center gap-2 cursor-not-allowed"
+                title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
               >
                 <CheckSquare2 className="h-4 w-4" />
                 Mark Complete

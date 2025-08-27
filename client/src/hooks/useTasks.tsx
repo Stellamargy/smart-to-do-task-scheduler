@@ -108,9 +108,11 @@ export const useTasks = () => {
         
         return response.data.task;
       } else {
+        // Handle specific error messages from backend (like dependency validation)
+        const errorMessage = response.error || 'Failed to update task';
         toast({
           title: 'Error',
-          description: response.error || 'Failed to update task',
+          description: errorMessage,
           variant: 'destructive',
         });
         return null;

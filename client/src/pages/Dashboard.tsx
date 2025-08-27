@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useTasks } from "@/hooks/useTasks";
+import { useToast } from "@/hooks/use-toast";
 
 // Import dashboard components
 import TaskList from "@/components/dashboard/TaskList";
@@ -23,6 +24,7 @@ import { Task, TaskUpdateInput, TaskStatus } from "@/types/task";
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { toast } = useToast();
   const {
     tasks,
     scheduledTasksData,
@@ -52,6 +54,29 @@ export default function Dashboard() {
   };
 
   const handleCompleteTask = async (taskId: string) => {
+    // Find the task to check if it can be completed
+    const task = tasks.find(t => t.id === taskId) || 
+                 scheduledTasksData?.scheduled_tasks.find(t => t.id === taskId);
+    
+    if (!task) {
+      toast({
+        title: "Error",
+        description: "Task not found",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Check if task can be completed (MeTTa logic validation)
+    if (!task.can_be_completed) {
+      toast({
+        title: "Cannot Complete Task",
+        description: `Task "${task.title}" cannot be completed because its dependency "${task.dependency_title || 'Unknown'}" is not yet completed.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     // Mark task as completed via update
     await updateTask(taskId, { status: TaskStatus.COMPLETED });
     // Immediately refresh both regular tasks and scheduled tasks to update UI
@@ -185,14 +210,29 @@ export default function Dashboard() {
                             </p>
                           )}
                         </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleCompleteTask(task.id)}
-                          className="text-green-600 hover:text-green-700"
-                        >
-                          <CheckSquare2 className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          {task.can_be_completed ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleCompleteTask(task.id)}
+                              className="text-green-600 hover:text-green-700"
+                              title="Mark as completed"
+                            >
+                              <CheckSquare2 className="h-4 w-4" />
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled
+                              className="text-gray-400 cursor-not-allowed"
+                              title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
+                            >
+                              <CheckSquare2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))
@@ -282,14 +322,27 @@ export default function Dashboard() {
                           >
                             Priority {task.priority}
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleCompleteTask(task.id)}
-                            className="text-green-600 hover:text-green-700"
-                          >
-                            <CheckSquare2 className="h-4 w-4" />
-                          </Button>
+                          {task.can_be_completed ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleCompleteTask(task.id)}
+                              className="text-green-600 hover:text-green-700"
+                              title="Mark as completed"
+                            >
+                              <CheckSquare2 className="h-4 w-4" />
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled
+                              className="text-gray-400 cursor-not-allowed"
+                              title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
+                            >
+                              <CheckSquare2 className="h-4 w-4" />
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </div>
