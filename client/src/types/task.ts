@@ -2,6 +2,7 @@ export interface Task {
   id: string;
   title: string;
   description: string;
+  notes?: string;
   dependency: string | null;
   dependency_title: string | null;
   deadline: string;
@@ -64,6 +65,7 @@ export interface TaskCreateInput {
 export interface TaskUpdateInput {
   title?: string;
   description?: string;
+  notes?: string;
   dependency?: string | null;
   deadline?: string;
   estimated_duration?: number;

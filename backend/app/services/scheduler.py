@@ -2,8 +2,15 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Tuple, Optional
 import os
 import pytz
+import threading
+import time
 from app.models.task import Task
+from app.services.notification_service import NotificationService
 from bson import ObjectId
+
+# Global lock to prevent concurrent scheduling operations
+_scheduling_lock = threading.Lock()
+_user_scheduling_locks = {}  # Per-user locks
 
 class TaskScheduler:
     """
@@ -24,16 +31,21 @@ class TaskScheduler:
         """
         self.deadline_weight = deadline_weight
         self.priority_weight = priority_weight
-        self.user_timezone = user_timezone or "UTC"
+        self.user_timezone = user_timezone
         
         # Set up timezone object - this is our PRIMARY working timezone
-        try:
-            self.user_tz = pytz.timezone(self.user_timezone)
-            print(f"🌍 Scheduler working in timezone: {self.user_timezone}")
-        except pytz.exceptions.UnknownTimeZoneError:
-            print(f"⚠️ Unknown timezone {self.user_timezone}, using UTC")
-            self.user_tz = pytz.UTC
-            self.user_timezone = "UTC"
+        if not user_timezone:
+            print("⚠️ WARNING: No user timezone provided. Automatic scheduling may use incorrect local time.")
+            print("Please provide user_timezone parameter for accurate scheduling.")
+            # Use a system default but warn about it
+            self.user_tz = pytz.timezone('UTC')
+            self.user_timezone = 'UTC'
+        else:
+            try:
+                self.user_tz = pytz.timezone(self.user_timezone)
+                print(f"🌍 Scheduler working in timezone: {self.user_timezone}")
+            except pytz.exceptions.UnknownTimeZoneError:
+                raise ValueError(f"⚠️ Unknown timezone {self.user_timezone}. Please provide a valid timezone.")
         
         # Set current time in user's timezone - NO CONVERSIONS
         if current_time:
@@ -66,7 +78,11 @@ class TaskScheduler:
         # Handle both timezone-aware and timezone-naive deadlines
         deadline = task.deadline
         if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            # Treat naive datetime as already in user's timezone
+            deadline = self.user_tz.localize(deadline)
+        else:
+            # Convert to user's timezone if different
+            deadline = deadline.astimezone(self.user_tz)
         
         time_until_deadline = (deadline - now).total_seconds() / 3600  # Hours
         
@@ -88,17 +104,17 @@ class TaskScheduler:
     def convert_db_time_to_user_timezone(self, db_time: datetime) -> datetime:
         """
         Convert database time to user's local timezone
-        Since we're working natively in user timezone, this ensures consistency
+        MongoEngine stores all datetimes in UTC, so we need to convert back
         
         Args:
-            db_time: Time from database (may be UTC)
+            db_time: Time from database (should be in UTC)
             
         Returns:
             Datetime in user's timezone
         """
         if db_time.tzinfo is None:
-            # Database stored as naive datetime - treat as user's timezone
-            user_local_time = self.user_tz.localize(db_time)
+            # Database stored as naive datetime - treat as UTC (MongoEngine default)
+            user_local_time = pytz.UTC.localize(db_time).astimezone(self.user_tz)
         else:
             # Convert whatever timezone to user's timezone
             user_local_time = db_time.astimezone(self.user_tz)
@@ -195,16 +211,22 @@ class TaskScheduler:
         scheduled_slots = []
         for existing_task in user_tasks:
             if existing_task.start_time and existing_task.end_time and existing_task.id != task.id:
-                # Since we're working in user's timezone, treat all times as user local
-                # NO timezone conversions - work with times as-is
+                # Convert UTC times from database to user's local timezone
                 start_time = existing_task.start_time
                 end_time = existing_task.end_time
                 
-                # Ensure timezone awareness for user's timezone
+                # Convert from UTC (database storage) to user's local timezone
                 if start_time.tzinfo is None:
-                    start_time = self.user_tz.localize(start_time)
+                    # Treat naive datetime as UTC (MongoEngine default)
+                    start_time = pytz.UTC.localize(start_time).astimezone(self.user_tz)
+                else:
+                    start_time = start_time.astimezone(self.user_tz)
+                    
                 if end_time.tzinfo is None:
-                    end_time = self.user_tz.localize(end_time)
+                    # Treat naive datetime as UTC (MongoEngine default)
+                    end_time = pytz.UTC.localize(end_time).astimezone(self.user_tz)
+                else:
+                    end_time = end_time.astimezone(self.user_tz)
                 
                 scheduled_slots.append((start_time, end_time))
                 print(f"🔍 Collision check: Found existing task '{existing_task.title}' at {start_time} to {end_time} ({self.user_timezone})")
@@ -216,11 +238,12 @@ class TaskScheduler:
         # Start with preferred time based on urgency
         task_duration = timedelta(hours=task.estimated_duration)
         
-        # Start with preferred time based on urgency
+        # Start with preferred time based on urgency, but never in the past
         today = now.replace(hour=preferred_start_hour, minute=0, second=0, microsecond=0)
         if today < now:
             today += timedelta(days=1)  # Move to next day if time has passed
             
+        # Always start from current time or later, never in the past
         current_time = max(now, today)
         
         # MeTTa Logic 4: Advanced collision detection and gap optimization
@@ -244,11 +267,16 @@ class TaskScheduler:
                         conflict_end_time = end_time
             
             if not has_conflict:
-                # Found a slot without conflicts
-                break
+                # Found a slot without conflicts - ensure it's not in the past
+                if current_time >= now:
+                    break
+                else:
+                    # If somehow we got a time in the past, move to current time
+                    current_time = now
+                    continue
             else:
                 # Move current_time to after the latest conflicting slot
-                current_time = conflict_end_time
+                current_time = max(conflict_end_time, now)  # Ensure never in the past
                 print(f"🔄 Conflict detected for '{task.title}', moving to {current_time}")
                 
             # Safety check to prevent scheduling too far in the future
@@ -261,7 +289,12 @@ class TaskScheduler:
             # For critical tasks, try to fit them as early as possible
             early_time = max(now, now.replace(hour=9, minute=0, second=0, microsecond=0))
             if not self.has_conflicts_with_existing(early_time, early_time + task_duration, scheduled_slots):
-                return early_time
+                current_time = early_time
+
+        # Final safety check: Never schedule in the past
+        if current_time < now:
+            print(f"⚠️ Warning: Correcting past scheduling time for '{task.title}' from {current_time} to {now}")
+            current_time = now
 
         return current_time
 
@@ -315,11 +348,21 @@ class TaskScheduler:
         # Ensure all datetimes are timezone-aware for comparison
         deadline = task.deadline
         if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            # Treat naive datetime as already in user's timezone
+            deadline = self.user_tz.localize(deadline)
+        else:
+            # Convert to user's timezone if different
+            deadline = deadline.astimezone(self.user_tz)
+            
         if start_time.tzinfo is None:
-            start_time = start_time.replace(tzinfo=timezone.utc)
+            start_time = self.user_tz.localize(start_time)
+        else:
+            start_time = start_time.astimezone(self.user_tz)
+            
         if end_time.tzinfo is None:
-            end_time = end_time.replace(tzinfo=timezone.utc)
+            end_time = self.user_tz.localize(end_time)
+        else:
+            end_time = end_time.astimezone(self.user_tz)
             
         if end_time > deadline:
             # Use MeTTa urgency recalculation to adjust timing
@@ -342,9 +385,14 @@ class TaskScheduler:
         """
         # Ensure all datetimes are timezone-aware for comparison
         if proposed_start.tzinfo is None:
-            proposed_start = proposed_start.replace(tzinfo=timezone.utc)
+            proposed_start = self.user_tz.localize(proposed_start)
+        else:
+            proposed_start = proposed_start.astimezone(self.user_tz)
+            
         if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            deadline = self.user_tz.localize(deadline)
+        else:
+            deadline = deadline.astimezone(self.user_tz)
             
         task_duration = timedelta(hours=task.estimated_duration)
         proposed_end = proposed_start + task_duration
@@ -353,7 +401,7 @@ class TaskScheduler:
         if proposed_end > deadline:
             # Try to schedule earlier if possible
             latest_start = deadline - task_duration
-            now = datetime.now(timezone.utc)
+            now = self.current_time
             
             if latest_start > now:
                 # Can meet deadline by starting earlier
@@ -393,7 +441,11 @@ class TaskScheduler:
                 start_time = self.user_tz.localize(start_time)
             if end_time.tzinfo is None:
                 end_time = self.user_tz.localize(end_time)
-                
+            
+            # Capture original times for notification comparison
+            original_start = task.start_time
+            original_end = task.end_time
+            
             # Set the scheduling flag to prevent recursive scheduling
             task._scheduling_in_progress = True
             
@@ -406,16 +458,47 @@ class TaskScheduler:
             
             status = 'overdue' if end_time > deadline else task.status
             
-            # Save to database using user's timezone times
-            # MongoDB will store these as-is, preserving the user's local time
+            # Save to database using UTC times (MongoEngine requirement)
+            # Convert user's local times to UTC for database storage
+            start_time_utc = start_time.astimezone(pytz.UTC) if start_time.tzinfo else pytz.UTC.localize(start_time)
+            end_time_utc = end_time.astimezone(pytz.UTC) if end_time.tzinfo else pytz.UTC.localize(end_time)
+            updated_at_utc = datetime.now(pytz.UTC)
+            
             print(f"💾 Saving task in {self.user_timezone}: {start_time} to {end_time}")
+            print(f"💾 Converting to UTC for DB: {start_time_utc} to {end_time_utc}")
             
             Task.objects(id=task.id).update(
-                start_time=start_time,     # User's local time 
-                end_time=end_time,         # User's local time
-                updated_at=datetime.now(self.user_tz),  # Current time in user's timezone
+                start_time=start_time_utc,     # Store in UTC as MongoEngine expects
+                end_time=end_time_utc,         # Store in UTC as MongoEngine expects
+                updated_at=updated_at_utc,     # Store in UTC as MongoEngine expects
                 status=status
             )
+            
+            # Create notification if task was rescheduled
+            try:
+                if original_start and original_end:
+                    # Convert original times from UTC (database) to user's timezone for comparison
+                    original_start_local = self.convert_db_time_to_user_timezone(original_start)
+                    original_end_local = self.convert_db_time_to_user_timezone(original_end)
+                    
+                    # Check if times actually changed (more than 1 minute difference to avoid noise)
+                    start_changed = abs((start_time - original_start_local).total_seconds()) > 60
+                    end_changed = abs((end_time - original_end_local).total_seconds()) > 60
+                    
+                    if start_changed or end_changed:
+                        notification_service = NotificationService()
+                        notification_service.create_task_rescheduled_notification(
+                            task_id=str(task.id),
+                            user_id=str(task.user_id),
+                            old_start=original_start_local,
+                            new_start=start_time,
+                            old_end=original_end_local,
+                            new_end=end_time
+                        )
+                        print(f"📝 Created rescheduling notification for task '{task.title}'")
+            except Exception as e:
+                print(f"⚠️ Error creating rescheduling notification: {e}")
+                # Don't fail the scheduling if notification fails
             
             print(f"✅ Successfully saved schedule for '{task.title}' in {self.user_timezone}: {start_time} to {end_time}")
             return True
@@ -519,9 +602,14 @@ class TaskScheduler:
                         # Check if task will be overdue
                         deadline = task.deadline
                         if deadline.tzinfo is None:
-                            deadline = deadline.replace(tzinfo=timezone.utc)
+                            deadline = self.user_tz.localize(deadline)
+                        else:
+                            deadline = deadline.astimezone(self.user_tz)
+                            
                         if end_time.tzinfo is None:
-                            end_time = end_time.replace(tzinfo=timezone.utc)
+                            end_time = self.user_tz.localize(end_time)
+                        else:
+                            end_time = end_time.astimezone(self.user_tz)
                             
                         task_info_dict = task.to_dict()
                         task_info_dict['allocated_duration'] = allocated_duration
@@ -559,9 +647,14 @@ class TaskScheduler:
                             # Check if task will be overdue
                             deadline = task.deadline
                             if deadline.tzinfo is None:
-                                deadline = deadline.replace(tzinfo=timezone.utc)
+                                deadline = self.user_tz.localize(deadline)
+                            else:
+                                deadline = deadline.astimezone(self.user_tz)
+                                
                             if end_time.tzinfo is None:
-                                end_time = end_time.replace(tzinfo=timezone.utc)
+                                end_time = self.user_tz.localize(end_time)
+                            else:
+                                end_time = end_time.astimezone(self.user_tz)
                                 
                             if end_time > deadline:
                                 task.status = 'overdue'
@@ -616,11 +709,19 @@ class TaskScheduler:
         comparison_end = metta_end_time
         
         if comparison_deadline.tzinfo is None:
-            comparison_deadline = comparison_deadline.replace(tzinfo=timezone.utc)
+            comparison_deadline = self.user_tz.localize(comparison_deadline)
+        else:
+            comparison_deadline = comparison_deadline.astimezone(self.user_tz)
+            
         if comparison_start.tzinfo is None:
-            comparison_start = comparison_start.replace(tzinfo=timezone.utc)
+            comparison_start = self.user_tz.localize(comparison_start)
+        else:
+            comparison_start = comparison_start.astimezone(self.user_tz)
+            
         if comparison_end.tzinfo is None:
-            comparison_end = comparison_end.replace(tzinfo=timezone.utc)
+            comparison_end = self.user_tz.localize(comparison_end)
+        else:
+            comparison_end = comparison_end.astimezone(self.user_tz)
             
         # Use MeTTa urgency recalculation to adjust timing if needed
         if comparison_end > comparison_deadline:
@@ -684,7 +785,9 @@ class TaskScheduler:
         
         # Handle timezone-aware comparison
         if earliest_deadline.tzinfo is None:
-            earliest_deadline = earliest_deadline.replace(tzinfo=timezone.utc)
+            earliest_deadline = self.user_tz.localize(earliest_deadline)
+        else:
+            earliest_deadline = earliest_deadline.astimezone(self.user_tz)
         
         # Calculate available time until deadline
         available_time = (earliest_deadline - self.current_time).total_seconds() / 3600  # Hours
@@ -716,7 +819,9 @@ class TaskScheduler:
         # Find the earliest deadline in the group
         earliest_deadline = min(task.deadline for task in tasks)
         if earliest_deadline.tzinfo is None:
-            earliest_deadline = earliest_deadline.replace(tzinfo=timezone.utc)
+            earliest_deadline = self.user_tz.localize(earliest_deadline)
+        else:
+            earliest_deadline = earliest_deadline.astimezone(self.user_tz)
         
         # Calculate available time until deadline
         available_time = (earliest_deadline - self.current_time).total_seconds() / 3600  # Hours
@@ -761,9 +866,27 @@ class TaskScheduler:
         
         return allocated_tasks
     
+    def _get_user_lock(self, user_id: str) -> threading.Lock:
+        """
+        Get or create a lock for a specific user to prevent concurrent scheduling
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Threading lock for the user
+        """
+        global _user_scheduling_locks
+        
+        with _scheduling_lock:
+            if user_id not in _user_scheduling_locks:
+                _user_scheduling_locks[user_id] = threading.Lock()
+            return _user_scheduling_locks[user_id]
+    
     def auto_schedule_on_task_change(self, user_id: str, changed_task_id: str = None) -> Dict:
         """
         Automatically reschedule all user tasks when a task is created/updated
+        Uses per-user locking to prevent concurrent scheduling operations
         
         Args:
             user_id: User ID
@@ -772,7 +895,20 @@ class TaskScheduler:
         Returns:
             Dictionary with scheduling results
         """
+        user_lock = self._get_user_lock(user_id)
+        
+        # Try to acquire lock with timeout to prevent hanging
+        lock_acquired = user_lock.acquire(timeout=5.0)
+        if not lock_acquired:
+            print(f"⚠️ Could not acquire scheduling lock for user {user_id} - another scheduling operation in progress")
+            return {
+                'success': False,
+                'message': 'Another scheduling operation is already in progress. Please try again in a moment.'
+            }
+        
         try:
+            print(f"🔒 Acquired scheduling lock for user {user_id}")
+            
             # Get all user tasks that need scheduling
             user_tasks = Task.objects(user=ObjectId(user_id), status__ne='completed')
             
@@ -789,6 +925,7 @@ class TaskScheduler:
             # Sequential scheduling with proper collision detection
             result = self.schedule_all_user_tasks_sequential(user_id)
             
+            print(f"🔓 Releasing scheduling lock for user {user_id}")
             return {
                 'success': True,
                 'message': 'Tasks automatically rescheduled',
@@ -796,11 +933,13 @@ class TaskScheduler:
             }
             
         except Exception as e:
-            print(f"Error in auto_schedule_on_task_change: {e}")
+            print(f"❌ Error in auto_schedule_on_task_change: {e}")
             return {
                 'success': False,
                 'message': f'Error in automatic scheduling: {str(e)}'
             }
+        finally:
+            user_lock.release()
     
     def reschedule_task(self, task_id: str) -> Dict:
         """

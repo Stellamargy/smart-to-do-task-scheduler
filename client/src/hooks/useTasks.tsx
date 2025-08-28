@@ -49,44 +49,56 @@ export const useTasks = () => {
     }
   }, [toast]);
 
-  // Fetch scheduled tasks with MeTTa logic
+  // Fetch scheduled tasks
   const fetchScheduledTasks = useCallback(async () => {
-    setLoading(true);
-    setError(null);
     try {
       const response = await taskService.getScheduledTasks();
       if (response.success && response.data) {
         setScheduledTasksData(response.data);
-        
-        // Show toast if MeTTa logic was applied
-        if (response.data.metta_logic_applied && response.data.newly_scheduled > 0) {
-          toast({
-            title: 'MeTTa Scheduling Applied',
-            description: `Automatically scheduled ${response.data.newly_scheduled} tasks using MeTTa logic`,
-          });
-          
-          // If tasks were scheduled, refresh the regular tasks to get updated scheduling data
-          setTimeout(() => fetchTasks(), 500); // Small delay to ensure backend has processed
-        }
       } else {
-        setError(response.error || 'Failed to fetch scheduled tasks');
-        toast({
-          title: 'Error',
-          description: response.error || 'Failed to fetch scheduled tasks',
-          variant: 'destructive',
-        });
+        console.warn('Failed to fetch scheduled tasks:', response.error);
       }
     } catch (err) {
-      setError('Network error occurred');
+      console.warn('Error fetching scheduled tasks:', err);
+    }
+  }, []);
+
+  // Create a task
+  const createTask = useCallback(async (taskData: Omit<TaskUpdateInput, 'status'>) => {
+    setLoading(true);
+    try {
+      const response = await taskService.createTask(taskData);
+      if (response.success && response.data) {
+        setTasks(prev => [...prev, response.data!.task]);
+        toast({
+          title: 'Success',
+          description: 'Task created successfully',
+        });
+        
+        // Refresh both task lists
+        fetchTasks();
+        fetchScheduledTasks();
+        
+        return response.data.task;
+      } else {
+        toast({
+          title: 'Error',
+          description: response.error || 'Failed to create task',
+          variant: 'destructive',
+        });
+        return null;
+      }
+    } catch (err) {
       toast({
         title: 'Error',
         description: 'Network error occurred',
         variant: 'destructive',
       });
+      return null;
     } finally {
       setLoading(false);
     }
-  }, [toast, fetchTasks]);
+  }, [toast, fetchTasks, fetchScheduledTasks]);
 
   // Update a task
   const updateTask = useCallback(async (taskId: string, taskData: TaskUpdateInput) => {
@@ -174,9 +186,9 @@ export const useTasks = () => {
     } finally {
       setLoading(false);
     }
-  }, [toast, fetchTasks, fetchScheduledTasks, scheduledTasksData]);
+  }, [toast, fetchTasks, fetchScheduledTasks]);
 
-  // Initialize
+  // Initialize data on mount
   useEffect(() => {
     fetchTasks();
     fetchScheduledTasks();
@@ -189,6 +201,7 @@ export const useTasks = () => {
     error,
     fetchTasks,
     fetchScheduledTasks,
+    createTask,
     updateTask,
     deleteTask,
   };

@@ -50,10 +50,25 @@ class TaskService {
     return apiService.get<{ task: Task; message: string }>(`${API_CONFIG.ENDPOINTS.TASKS.BASE}/${taskId}`);
   }
 
+  // Create a new task
+  async createTask(taskData: Omit<TaskUpdateInput, 'status'>): Promise<ApiResponse<{ message: string; task: Task }>> {
+    return apiService.post<{ message: string; task: Task }>(
+      API_CONFIG.ENDPOINTS.TASKS.BASE,
+      taskData
+    );
+  }
+
   // Update a task
   async updateTask(taskId: string, taskData: TaskUpdateInput): Promise<ApiResponse<{ message: string; task: Task }>> {
+    // Send current time and timezone to backend for accurate rescheduling
+    const currentTime = new Date().toISOString();
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const params = new URLSearchParams();
+    params.append('current_time', currentTime);
+    params.append('timezone', timezone);
+    
     return apiService.put<{ message: string; task: Task }>(
-      `${API_CONFIG.ENDPOINTS.TASKS.BASE}/${taskId}`,
+      `${API_CONFIG.ENDPOINTS.TASKS.BASE}/${taskId}?${params.toString()}`,
       taskData
     );
   }

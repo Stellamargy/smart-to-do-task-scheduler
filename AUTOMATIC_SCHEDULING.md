@@ -79,3 +79,4 @@ The task scheduler has been modified to automatically schedule tasks without man
 - High priority tasks automatically get precedence
 - No need to manually trigger scheduling operations
 - Tasks are always scheduled optimally based on current constraints
+   

@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider, useAuth } from "@/hooks/useAuth";
+import { FloatingActionProvider } from "@/contexts/FloatingActionContext";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
@@ -12,6 +13,7 @@ import NotFound from "./pages/NotFound";
 import AuthPage from "./pages/Auth";
 import TaskDetail from "./pages/TaskDetail";
 import DependencyVisualization from "./pages/dependencyVisualization";
+import Notifications from "./pages/Notifications";
 
 const queryClient = new QueryClient();
 
@@ -73,30 +75,47 @@ const AppContent = () => (
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={
         <ProtectedRoute>
-          <AppLayout>
-            <Dashboard />
-          </AppLayout>
+          <FloatingActionProvider>
+            <AppLayout>
+              <Dashboard />
+            </AppLayout>
+          </FloatingActionProvider>
         </ProtectedRoute>
       } />
       <Route path="/task/:taskId" element={
         <ProtectedRoute>
-          <AppLayout>
-            <TaskDetail />
-          </AppLayout>
+          <FloatingActionProvider>
+            <AppLayout>
+              <TaskDetail />
+            </AppLayout>
+          </FloatingActionProvider>
         </ProtectedRoute>
       } />
       <Route path="/dependency-visualization" element={
         <ProtectedRoute>
-          <AppLayout>
-            <DependencyVisualization />
-          </AppLayout>
+          <FloatingActionProvider>
+            <AppLayout>
+              <DependencyVisualization />
+            </AppLayout>
+          </FloatingActionProvider>
         </ProtectedRoute>
       } />
       <Route path="/settings" element={
         <ProtectedRoute>
-          <AppLayout>
-            <Settings />
-          </AppLayout>
+          <FloatingActionProvider>
+            <AppLayout>
+              <Settings />
+            </AppLayout>
+          </FloatingActionProvider>
+        </ProtectedRoute>
+      } />
+      <Route path="/notifications" element={
+        <ProtectedRoute>
+          <FloatingActionProvider>
+            <AppLayout>
+              <Notifications />
+            </AppLayout>
+          </FloatingActionProvider>
         </ProtectedRoute>
       } />
       

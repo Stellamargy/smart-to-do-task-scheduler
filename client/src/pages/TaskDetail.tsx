@@ -5,6 +5,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import {
   AlertCircle,
   ArrowLeft,
@@ -18,21 +19,29 @@ import {
   Timer,
   Edit,
   Trash2,
+  FileText,
 } from "lucide-react";
 import { Task, TaskStatus, TaskDetailedView } from "@/types/task";
 import { taskService } from "@/services/tasks";
 import { useTasks } from "@/hooks/useTasks";
 import { useToast } from "@/hooks/use-toast";
+import { useIsMobile } from "@/hooks/use-mobile";
+import EditTaskDialog from "@/components/dashboard/EditTaskDialog";
+import NotesCard from "@/components/dashboard/NotesCard";
 
 export default function TaskDetail() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const { updateTask, deleteTask } = useTasks();
   const { toast } = useToast();
+  const isMobile = useIsMobile();
   
   const [task, setTask] = useState<TaskDetailedView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [updateLoading, setUpdateLoading] = useState(false);
+  const [notesSheetOpen, setNotesSheetOpen] = useState(false);
 
   useEffect(() => {
     if (taskId) {
@@ -84,10 +93,72 @@ export default function TaskDetail() {
     if (window.confirm("Are you sure you want to delete this task?")) {
       try {
         await deleteTask(task.id);
+        toast({
+          title: "Task deleted",
+          description: "Task has been successfully deleted.",
+        });
         navigate("/dashboard");
       } catch (err) {
         console.error("Error deleting task:", err);
+        toast({
+          title: "Error",
+          description: "Failed to delete task. Please try again.",
+          variant: "destructive",
+        });
       }
+    }
+  };
+
+  const handleUpdateTask = async (updates: Partial<Task>) => {
+    if (!task || !taskId) return;
+    
+    try {
+      setUpdateLoading(true);
+      await updateTask(taskId, updates);
+      
+      // Refresh task data
+      await fetchTask(taskId);
+      
+      toast({
+        title: "Task updated",
+        description: "Task details have been successfully updated.",
+      });
+      setEditDialogOpen(false);
+    } catch (error) {
+      console.error('Error updating task:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update task. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUpdateLoading(false);
+    }
+  };
+
+  const handleUpdateNotes = async (notes: string) => {
+    if (!task || !taskId) return;
+    
+    try {
+      setUpdateLoading(true);
+      await updateTask(taskId, { notes });
+      
+      // Update local state immediately for better UX
+      setTask(prev => prev ? { ...prev, notes } : null);
+      
+      toast({
+        title: "Notes updated",
+        description: "Task notes have been saved.",
+      });
+    } catch (error) {
+      console.error('Error updating notes:', error);
+      toast({
+        title: "Error",
+        description: "Failed to save notes. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setUpdateLoading(false);
     }
   };
 
@@ -149,67 +220,98 @@ export default function TaskDetail() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20 p-6">
-      <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="outline"
-              onClick={() => navigate("/dashboard")}
-              className="flex items-center gap-2"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Back
-            </Button>
-            <div>
-              <h1 className="text-2xl font-bold text-foreground">{task.title}</h1>
-              <p className="text-muted-foreground">Task Details</p>
+    <div className="h-full flex flex-col lg:flex-row overflow-hidden">
+      {/* Main Content - Full width on mobile, 65% on desktop */}
+      <div className="flex-1 lg:w-[65%] overflow-y-auto">
+        <div className="p-6 space-y-6">
+          {/* Header */}
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div className="flex items-center gap-4">
+              <Button
+                variant="outline"
+                onClick={() => navigate("/dashboard")}
+                className="flex items-center gap-2"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back
+              </Button>
+              <div>
+                <h1 className="text-2xl font-bold text-foreground">{task.title}</h1>
+                <p className="text-muted-foreground">Task Details</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              {task.status !== TaskStatus.COMPLETED && task.can_be_completed && (
+                <Button
+                  onClick={handleCompleteTask}
+                  className="flex items-center gap-2"
+                  title="Mark as completed"
+                >
+                  <CheckSquare2 className="h-4 w-4" />
+                  Mark Complete
+                </Button>
+              )}
+              {task.status !== TaskStatus.COMPLETED && !task.can_be_completed && (
+                <Button
+                  disabled
+                  variant="outline"
+                  className="flex items-center gap-2 cursor-not-allowed"
+                  title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
+                >
+                  <CheckSquare2 className="h-4 w-4" />
+                  Mark Complete
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                onClick={() => setEditDialogOpen(true)}
+                className="flex items-center gap-2"
+              >
+                <Edit className="h-4 w-4" />
+                Edit
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={handleDeleteTask}
+                className="flex items-center gap-2"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete
+              </Button>
+              {/* Notes button for mobile/tablet */}
+              <div className="lg:hidden">
+                <Sheet open={notesSheetOpen} onOpenChange={setNotesSheetOpen}>
+                  <SheetTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className="flex items-center gap-2"
+                    >
+                      <FileText className="h-4 w-4" />
+                      Notes
+                    </Button>
+                  </SheetTrigger>
+                  <SheetContent 
+                    side="right" 
+                    className="w-full sm:w-[80%] md:w-[80%] p-0 fixed inset-y-0 right-0 h-full border-l z-50 bg-background shadow-lg data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right"
+                  >
+                    <div className="p-6 h-full overflow-y-auto">
+                      <SheetHeader className="mb-6">
+                        <SheetTitle>Task Notes</SheetTitle>
+                      </SheetHeader>
+                      <NotesCard 
+                        task={task}
+                        onUpdateNotes={handleUpdateNotes}
+                        loading={updateLoading}
+                      />
+                    </div>
+                  </SheetContent>
+                </Sheet>
+              </div>
             </div>
           </div>
-          <div className="flex gap-2">
-            {task.status !== TaskStatus.COMPLETED && task.can_be_completed && (
-              <Button
-                onClick={handleCompleteTask}
-                className="flex items-center gap-2"
-                title="Mark as completed"
-              >
-                <CheckSquare2 className="h-4 w-4" />
-                Mark Complete
-              </Button>
-            )}
-            {task.status !== TaskStatus.COMPLETED && !task.can_be_completed && (
-              <Button
-                disabled
-                variant="outline"
-                className="flex items-center gap-2 cursor-not-allowed"
-                title={`Cannot complete: dependency "${task.dependency_title || 'Unknown'}" must be completed first`}
-              >
-                <CheckSquare2 className="h-4 w-4" />
-                Mark Complete
-              </Button>
-            )}
-            <Button
-              variant="outline"
-              className="flex items-center gap-2"
-            >
-              <Edit className="h-4 w-4" />
-              Edit
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDeleteTask}
-              className="flex items-center gap-2"
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete
-            </Button>
-          </div>
-        </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Task Information */}
-          <div className="lg:col-span-2 space-y-6">
+          <div className="space-y-6">
             {/* Basic Information */}
             <Card>
               <CardHeader>
@@ -348,10 +450,7 @@ export default function TaskDetail() {
                 </CardContent>
               </Card>
             )}
-          </div>
 
-          {/* Sidebar */}
-          <div className="space-y-6">
             {/* Quick Stats */}
             <Card>
               <CardHeader>
@@ -432,6 +531,28 @@ export default function TaskDetail() {
           </div>
         </div>
       </div>
+
+      {/* Notes Sidebar - Desktop only, 35% width */}
+      <div className="hidden lg:block w-[35%] bg-muted/10 border-l border-border overflow-y-auto">
+        <div className="p-6 sticky top-0">
+          <NotesCard 
+            task={task}
+            onUpdateNotes={handleUpdateNotes}
+            loading={updateLoading}
+          />
+        </div>
+      </div>
+
+      {/* Edit Dialog */}
+      {editDialogOpen && (
+        <EditTaskDialog
+          task={task}
+          open={editDialogOpen}
+          onOpenChange={setEditDialogOpen}
+          onSave={handleUpdateTask}
+          loading={updateLoading}
+        />
+      )}
     </div>
   );
 }

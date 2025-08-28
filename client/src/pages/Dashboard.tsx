@@ -19,6 +19,7 @@ import { useToast } from "@/hooks/use-toast";
 
 // Import dashboard components
 import TaskList from "@/components/dashboard/TaskList";
+import EditTaskDialog from "@/components/dashboard/EditTaskDialog";
 
 import { Task, TaskUpdateInput, TaskStatus } from "@/types/task";
 
@@ -38,13 +39,23 @@ export default function Dashboard() {
 
   // Dialog states
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
 
   // Handlers
   const handleEditTask = (task: Task) => {
     setEditingTask(task);
-    // You'll need to implement task editing logic here
-    // For now, just log the task
-    console.log("Editing task:", task);
+    setEditDialogOpen(true);
+  };
+
+  const handleSaveEditedTask = async (taskData: Partial<Task>) => {
+    if (!editingTask) return;
+    
+    const success = await updateTask(editingTask.id, taskData as TaskUpdateInput);
+    if (success) {
+      setEditDialogOpen(false);
+      setEditingTask(null);
+      // Both fetchTasks and fetchScheduledTasks are called automatically in updateTask
+    }
   };
 
   const handleDeleteTask = async (taskId: string) => {
@@ -101,7 +112,7 @@ export default function Dashboard() {
     tasks.filter(task => task.start_time && task.end_time).length === 0;
   
   // Filter upcoming tasks from all tasks (based on deadline proximity)
-  // Exclude tasks that are already in MeTTa scheduled tasks
+  // Exclude tasks that are already in MeTTa scheduled tasks AND exclude overdue tasks
   const scheduledTaskIds = new Set(scheduledTasks.map(task => task.id));
   const upcomingTasks = tasks.filter((task) => {
     if (!task.deadline) return false;
@@ -111,7 +122,7 @@ export default function Dashboard() {
     const threeDaysFromNow = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
     return (
       deadline <= threeDaysFromNow &&
-      deadline >= now &&
+      deadline >= now && // This ensures task is not overdue (deadline is in the future)
       task.status !== TaskStatus.COMPLETED
     );
   });
@@ -373,6 +384,17 @@ export default function Dashboard() {
           />
         </div>
       </div>
+
+      {/* Edit Task Dialog */}
+      {editingTask && (
+        <EditTaskDialog
+          task={editingTask}
+          open={editDialogOpen}
+          onOpenChange={setEditDialogOpen}
+          onSave={handleSaveEditedTask}
+          loading={loading}
+        />
+      )}
     </div>
   );
 }

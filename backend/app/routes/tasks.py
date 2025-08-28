@@ -6,7 +6,9 @@ from marshmallow import Schema, fields, ValidationError
 from app.models.task import Task, TaskStatus, TaskPriority
 from app.models import User
 from app.services.scheduler import TaskScheduler
+from app.services.notification_service import NotificationService
 import traceback
+import pytz
 
 tasks_bp = Blueprint('tasks', __name__)
 
@@ -20,11 +22,29 @@ def handle_preflight():
 class TaskUpdateSchema(Schema):
     title = fields.Str(validate=lambda x: len(x.strip()) > 0)
     description = fields.Str()
+    notes = fields.Str()
     dependency = fields.Str(allow_none=True)
-    deadline = fields.DateTime()
+    deadline = fields.Raw()  # Accept raw string and parse manually to avoid timezone conversion
     estimated_duration = fields.Float(validate=lambda x: x > 0)
     priority = fields.Int(validate=lambda x: 1 <= x <= 5)
     status = fields.Str(validate=lambda x: x in [status.value for status in TaskStatus])
+
+def parse_deadline_as_naive(deadline_str):
+    """Parse deadline string as naive datetime to avoid timezone conversion"""
+    if not deadline_str:
+        return None
+    
+    try:
+        # Handle formats like "2025-08-28T08:00:00" or "2025-08-28T08:00:00.000Z"
+        if deadline_str.endswith('Z'):
+            deadline_str = deadline_str[:-1]  # Remove Z
+        if '.' in deadline_str:
+            deadline_str = deadline_str.split('.')[0]  # Remove milliseconds
+        
+        # Parse as naive datetime (no timezone info)
+        return datetime.fromisoformat(deadline_str)
+    except ValueError as e:
+        raise ValidationError(f"Invalid deadline format: {deadline_str}")
 
 @tasks_bp.route('/health', methods=['GET'])
 def health_check():
@@ -50,7 +70,6 @@ def get_all_tasks():
                 
                 # If timezone is provided, use it for proper local time handling
                 if frontend_timezone:
-                    import pytz
                     try:
                         user_timezone = pytz.timezone(frontend_timezone)
                         # Convert to user's timezone if needed
@@ -73,20 +92,38 @@ def get_all_tasks():
             print(f"No frontend time provided, using server UTC time: {current_time}")
         
         # Automatically run MeTTa scheduling algorithm on fetch
+        # This ensures tasks with completed/overdue dependencies get properly scheduled
+        print(f"🔄 Starting auto-scheduling check for user {current_user_id}")
         try:
             # Initialize scheduler with user's timezone for accurate scheduling
             scheduler_timezone = frontend_timezone if frontend_timezone else 'UTC'
             scheduler = TaskScheduler(current_time=current_time, user_timezone=scheduler_timezone)
-            # Check if there are any unscheduled tasks that need scheduling
+            
+            # Always run scheduling to ensure tasks with completed/overdue dependencies get scheduled
             all_user_tasks = Task.objects(user=user, status__ne=TaskStatus.COMPLETED.value)
             unscheduled_tasks = [task for task in all_user_tasks if not task.start_time or not task.end_time]
             
-            if unscheduled_tasks:
-                print(f"🔄 Auto-scheduling {len(unscheduled_tasks)} unscheduled tasks on fetch")
-                result = scheduler.auto_schedule_on_task_change(current_user_id)
-                print(f"📅 Auto-scheduling completed: {result.get('message', 'Success')}")
+            # Check for tasks that can now be scheduled due to dependency changes
+            newly_schedulable = []
+            for task in all_user_tasks:
+                if not task.start_time or not task.end_time:
+                    if task.can_be_scheduled():
+                        newly_schedulable.append(task)
+            
+            # Always run scheduling to ensure fresh state, even if no unscheduled tasks
+            print(f"🔄 Force-running auto-scheduling: {len(unscheduled_tasks)} unscheduled, {len(newly_schedulable)} newly schedulable, {len(all_user_tasks)} total tasks")
+            result = scheduler.auto_schedule_on_task_change(current_user_id)
+            print(f"📅 Auto-scheduling result: {result}")
+            
+            if result.get('success'):
+                print(f"✅ Auto-scheduling completed successfully: {result.get('message', 'Success')}")
+            else:
+                print(f"⚠️ Auto-scheduling failed: {result.get('message', 'Unknown error')}")
+                
         except Exception as e:
-            print(f"⚠️ Warning: Auto-scheduling failed on fetch: {e}")
+            print(f"⚠️ Critical error in auto-scheduling: {e}")
+            import traceback
+            print(f"📝 Full traceback: {traceback.format_exc()}")
             # Continue with regular task fetch even if scheduling fails
         
         # Get query parameters
@@ -134,7 +171,6 @@ def get_scheduled_tasks():
                 
                 # If timezone is provided, use it for proper local time handling
                 if frontend_timezone:
-                    import pytz
                     try:
                         user_timezone = pytz.timezone(frontend_timezone)
                         # Convert to user's timezone if needed
@@ -231,6 +267,73 @@ def get_scheduled_tasks():
         print(f"Error getting scheduled tasks: {traceback.format_exc()}")
         return jsonify({'error': 'Internal server error'}), 500
 
+@tasks_bp.route('', methods=['POST'])
+@jwt_required()
+def create_task():
+    """Create a new task"""
+    try:
+        current_user_id = get_jwt_identity()
+        user = User.objects.get(id=ObjectId(current_user_id))
+        
+        # Validate request data
+        schema = TaskUpdateSchema()
+        data = schema.load(request.json)
+        
+        # Check if dependency exists and belongs to the same user
+        dependency_task = None
+        if 'dependency' in data and data['dependency']:
+            try:
+                dependency_task = Task.objects.get(
+                    id=ObjectId(data['dependency']),
+                    user=user
+                )
+            except Task.DoesNotExist:
+                return jsonify({'error': 'Dependency task not found or does not belong to user'}), 400
+        
+        # Create new task
+        task_data = {
+            'title': data['title'],
+            'description': data.get('description', ''),
+            'notes': data.get('notes', ''),
+            'deadline': parse_deadline_as_naive(data['deadline']),
+            'estimated_duration': data['estimated_duration'],
+            'priority': data['priority'],
+            'user': user,
+            'dependency': dependency_task,
+            'status': TaskStatus.PENDING.value  # Default status for new tasks
+        }
+        
+        # Validate dependency to prevent circular references
+        if dependency_task:
+            temp_task = Task(**task_data)
+            if not temp_task.validate_dependency(dependency_task):
+                return jsonify({'error': 'Invalid dependency: would create circular reference'}), 400
+        
+        # Create and save the task
+        task = Task(**task_data)
+        task.save()
+        
+        print(f"✅ Task '{task.title}' created successfully")
+        
+        # Trigger automatic rescheduling
+        try:
+            scheduler = TaskScheduler()
+            result = scheduler.auto_schedule_on_task_change(current_user_id)
+            print(f"🔄 Auto-rescheduling triggered after task creation: {result.get('message', 'Success')}")
+        except Exception as e:
+            print(f"⚠️ Warning: Auto-rescheduling failed after task creation: {e}")
+        
+        return jsonify({
+            'message': 'Task created successfully',
+            'task': task.to_dict()
+        }), 201
+        
+    except ValidationError as e:
+        return jsonify({'error': 'Validation error', 'details': e.messages}), 400
+    except Exception as e:
+        print(f"Error creating task: {traceback.format_exc()}")
+        return jsonify({'error': 'Internal server error'}), 500
+
 @tasks_bp.route('/<task_id>', methods=['GET'])
 @jwt_required()
 def get_task(task_id):
@@ -289,6 +392,7 @@ def get_task(task_id):
             'id': str(task.id),
             'title': task.title,
             'description': task.description,
+            'notes': task.notes,
             'dependency': str(task.dependency.id) if task.dependency else None,
             'dependency_title': task.dependency.title if task.dependency else None,
             'dependency_details': dependency_details,
@@ -305,7 +409,8 @@ def get_task(task_id):
             'user': str(task.user.id),
             'is_independent': task.dependency is None,
             'is_overdue': is_overdue,
-            'is_scheduled': task.start_time is not None and task.end_time is not None
+            'is_scheduled': task.start_time is not None and task.end_time is not None,
+            'can_be_completed': task.can_be_completed()
         }
         
         return jsonify({
@@ -354,7 +459,11 @@ def update_task(task_id):
         
         # Update task fields
         for field, value in data.items():
-            if field != 'dependency':  # Already handled above
+            if field == 'dependency':  # Already handled above
+                continue
+            elif field == 'deadline':  # Handle deadline specially to avoid timezone conversion
+                task.deadline = parse_deadline_as_naive(value)
+            else:
                 setattr(task, field, value)
         
         # MeTTa Logic: Check if task can be completed when status is being set to completed
@@ -384,6 +493,40 @@ def update_task(task_id):
         # Save the task (this will automatically trigger rescheduling)
         task.save()
         
+        # Trigger immediate rescheduling for any significant changes
+        # This includes: priority changes, deadline changes, dependency changes, or status changes
+        significant_changes = ['priority', 'deadline', 'dependency', 'status']
+        if any(field in data for field in significant_changes):
+            try:
+                # Get timezone info from frontend for accurate scheduling
+                frontend_current_time = request.args.get('current_time')
+                frontend_timezone = request.args.get('timezone')
+                
+                current_time = None
+                scheduler_timezone = 'UTC'
+                
+                if frontend_current_time:
+                    try:
+                        current_time = datetime.fromisoformat(frontend_current_time.replace('Z', '+00:00'))
+                        if frontend_timezone:
+                            try:
+                                user_timezone = pytz.timezone(frontend_timezone)
+                                if current_time.tzinfo is None:
+                                    current_time = user_timezone.localize(current_time)
+                                else:
+                                    current_time = current_time.astimezone(user_timezone)
+                                scheduler_timezone = frontend_timezone
+                            except pytz.exceptions.UnknownTimeZoneError:
+                                pass
+                    except ValueError:
+                        pass
+                
+                scheduler = TaskScheduler(current_time=current_time, user_timezone=scheduler_timezone)
+                result = scheduler.auto_schedule_on_task_change(current_user_id)
+                print(f"🔄 Auto-rescheduling triggered after task update: {result.get('message', 'Success')}")
+            except Exception as e:
+                print(f"⚠️ Warning: Auto-rescheduling failed after task update: {e}")
+        
         # If task was marked as completed, trigger immediate rescheduling to update dependencies
         if 'status' in data and data['status'] == TaskStatus.COMPLETED.value:
             try:
@@ -392,6 +535,20 @@ def update_task(task_id):
                 print(f"🔄 Auto-rescheduling triggered after task completion: {result.get('message', 'Success')}")
             except Exception as e:
                 print(f"⚠️ Warning: Auto-rescheduling failed after task completion: {e}")
+            
+            # Create notifications for dependent tasks that are now unlocked
+            try:
+                notification_service = NotificationService()
+                dependent_tasks = task.get_dependencies()
+                if dependent_tasks:
+                    notification_service.create_dependency_completed_notification(
+                        user=user,
+                        completed_task=task,
+                        dependent_tasks=list(dependent_tasks)
+                    )
+                    print(f"📬 Created dependency completion notification for {len(dependent_tasks)} tasks")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to create dependency notification: {e}")
         
         return jsonify({
             'message': 'Task updated and schedule automatically adjusted',

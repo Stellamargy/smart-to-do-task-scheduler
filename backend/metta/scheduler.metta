@@ -240,6 +240,8 @@
 ;; Define dependency relationships
 (: depends-on (-> String String))
 (: independent-task (-> String))
+(: task-overdue (-> String Bool))
+(: task-just-became-overdue (-> String Bool))
 
 ;; Define automatic scheduling predicates
 (: auto-schedule-trigger (-> String String))
@@ -261,6 +263,10 @@
 (= (auto-schedule-trigger "task-completed" $task-id)
    (reschedule-all-tasks (get-user-id $task-id)))
 
+;; When a task becomes overdue (enables dependent tasks)
+(= (auto-schedule-trigger "task-overdue" $task-id)
+   (reschedule-all-tasks (get-user-id $task-id)))
+
 ;; When a task is deleted
 (= (auto-schedule-trigger "task-deleted" $user-id)
    (reschedule-all-tasks $user-id))
@@ -269,19 +275,22 @@
 (= (can-schedule $task-id)
    (independent-task $task-id))
 
-;; Rule: Dependent tasks can be scheduled if immediate dependency is completed
+;; Rule: Dependent tasks can be scheduled if immediate dependency is completed OR overdue
 ;; No recursive checking needed - only validate immediate dependency
+;; Overdue dependencies do not block scheduling of dependent tasks
 (= (can-schedule $task-id)
    (and (depends-on $task-id $dependency-id)
-        (task-completed $dependency-id)))
+        (or (task-completed $dependency-id)
+            (task-overdue $dependency-id))))
 
-;; Rule: Task is eligible when its direct dependency completes
+;; Rule: Task is eligible when its direct dependency completes OR becomes overdue
 ;; Example: Task B depends on Task A
-;; Task B becomes schedulable only when Task A is completed
+;; Task B becomes schedulable when Task A is completed OR when Task A becomes overdue
 ;; Task B does not need to check the status of A's dependencies
 (= (becomes-eligible $task-id)
    (and (depends-on $task-id $dependency-id)
-        (task-just-completed $dependency-id)))
+        (or (task-just-completed $dependency-id)
+            (task-just-became-overdue $dependency-id))))
 
 ;; Rule: Calculate urgency score based on deadline and priority
 ;; Higher score = more urgent (for automatic prioritization)
@@ -327,12 +336,13 @@
 (= (get-independent-tasks-auto $tasks)
    (filter (lambda ($task) (independent-task (task-id $task))) $tasks))
 
-;; Get all dependent tasks that can now be scheduled
+;; Get all dependent tasks that can now be scheduled (completed or overdue dependencies)
 (: get-newly-schedulable-tasks (-> List List))
 (= (get-newly-schedulable-tasks $tasks)
    (filter (lambda ($task) 
      (and (depends-on (task-id $task) $dep-id)
-          (task-completed $dep-id))) $tasks))
+          (or (task-completed $dep-id)
+              (task-overdue $dep-id)))) $tasks))
 
 ;; Automatic time allocation algorithm
 (: auto-allocate-time (-> String Number String String))
@@ -353,7 +363,8 @@
    (or (task-priority-changed $task-id)
        (task-deadline-changed $task-id)
        (task-dependency-changed $task-id)
-       (dependency-completed $task-id)))
+       (dependency-completed $task-id)
+       (dependency-became-overdue $task-id)))
 
 ;; Main automatic scheduling function
 (: auto-schedule-all-user-tasks (-> String List))
@@ -379,11 +390,19 @@
      (apply-optimized-schedule $optimized)))
 
 ;; Dependency chain automatic rescheduling
-;; When a task completes, only immediate dependents become eligible
+;; When a task completes OR becomes overdue, immediate dependents become eligible
 (: reschedule-immediate-dependents (-> String))
 (= (reschedule-immediate-dependents $completed-task-id)
    (let* (($immediate-dependents (get-immediate-dependents $completed-task-id))
           ($newly-eligible (filter-now-schedulable $immediate-dependents)))
+     (auto-schedule-tasks $newly-eligible)))
+
+;; Overdue dependency chain rescheduling
+;; When a task becomes overdue, schedule its immediate dependents
+(: reschedule-dependents-of-overdue (-> String))
+(= (reschedule-dependents-of-overdue $overdue-task-id)
+   (let* (($immediate-dependents (get-immediate-dependents $overdue-task-id))
+          ($newly-eligible (filter-now-schedulable-overdue $immediate-dependents)))
      (auto-schedule-tasks $newly-eligible)))
 
 ;; Get only immediate dependents (no recursive lookup)
@@ -392,22 +411,49 @@
    (filter (lambda ($task) 
      (= (task-dependency $task) $task-id)) (get-all-tasks)))
 
-;; Validation rule: A task can only be scheduled if immediate dependency is complete
+;; Filter tasks that are now schedulable due to completed or overdue dependencies
+(: filter-now-schedulable (-> List List))
+(= (filter-now-schedulable $tasks)
+   (filter (lambda ($task)
+     (validate-immediate-dependency (task-id $task))) $tasks))
+
+;; Filter tasks that are now schedulable specifically due to overdue dependencies
+(: filter-now-schedulable-overdue (-> List List))
+(= (filter-now-schedulable-overdue $tasks)
+   (filter (lambda ($task)
+     (let* (($dep-id (get-immediate-dependency (task-id $task))))
+       (and (not (= $dep-id none))
+            (task-overdue $dep-id)))) $tasks))
+
+;; Validation rule: A task can only be scheduled if immediate dependency is complete OR overdue
 (: validate-immediate-dependency (-> String Bool))
 (= (validate-immediate-dependency $task-id)
    (let* (($immediate-dep (get-immediate-dependency $task-id)))
      (if (= $immediate-dep none)
          true  ;; Independent task
-         (task-completed $immediate-dep))))
+         (or (task-completed $immediate-dep)
+             (task-overdue $immediate-dep)))))
 
-;; Simple dependency chain example:
+;; Simple dependency chain example with overdue handling:
 ;; Task A (independent) -> Task B -> Task C -> Task D
 ;; When A completes, only B becomes eligible
 ;; When B completes, only C becomes eligible  
 ;; When C completes, only D becomes eligible
+;; If any task becomes overdue, its immediate dependents become eligible
+;; Example: If A becomes overdue, B can still be scheduled
+;;          If B becomes overdue, C can still be scheduled
 (: example-chain-validation (-> String String String String))
 (= (example-chain-validation $task-a $task-b $task-c $task-d)
    (and (independent-task $task-a)
         (depends-on $task-b $task-a)
         (depends-on $task-c $task-b)
         (depends-on $task-d $task-c)))
+
+;; Overdue dependency example:
+;; If Task A is overdue and Task B depends on Task A,
+;; then Task B should still be schedulable
+(: overdue-dependency-example (-> String String Bool))
+(= (overdue-dependency-example $task-a $task-b)
+   (and (depends-on $task-b $task-a)
+        (task-overdue $task-a)
+        (can-schedule $task-b)))  ;; This should return true

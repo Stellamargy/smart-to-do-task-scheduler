@@ -19,6 +19,7 @@ class Task(Document):
     """Task model for the task scheduler"""
     title = StringField(required=True, max_length=200)
     description = StringField(max_length=1000)
+    notes = StringField(max_length=2000)  # User notes for the task
     dependency = ReferenceField('self', required=False)  # Reference to parent task
     deadline = DateTimeField(required=True)
     estimated_duration = FloatField(required=True)  # Duration in hours
@@ -51,19 +52,28 @@ class Task(Document):
             # Run scheduling in a separate thread to avoid blocking
             def schedule_async():
                 try:
+                    print(f"🔄 Task save triggered auto-scheduling for user {self.user.id}")
                     scheduler = TaskScheduler()
-                    scheduler.auto_schedule_on_task_change(str(self.user.id), str(self.id))
+                    result = scheduler.auto_schedule_on_task_change(str(self.user.id), str(self.id))
+                    print(f"📅 Auto-scheduling from task save result: {result}")
                 except Exception as e:
-                    print(f"Error in automatic scheduling: {e}")
+                    print(f"❌ Error in automatic scheduling from task save: {e}")
+                    import traceback
+                    print(f"📝 Full traceback: {traceback.format_exc()}")
             
             # Only schedule if this is not already a scheduling operation
             # and if this is a meaningful change (not just timestamp updates)
             if not getattr(self, '_scheduling_in_progress', False):
+                print(f"🚀 Starting async scheduling thread for task {self.title}")
                 threading.Thread(target=schedule_async, daemon=True).start()
+            else:
+                print(f"⏸️ Skipping auto-scheduling - already in progress for task {self.title}")
                 
         except Exception as e:
             # Log the error but don't fail the save operation
-            print(f"Error starting automatic scheduling: {e}")
+            print(f"❌ Error starting automatic scheduling from task save: {e}")
+            import traceback
+            print(f"📝 Full traceback: {traceback.format_exc()}")
         
         return result
     
@@ -86,15 +96,19 @@ class Task(Document):
     
     def can_be_scheduled(self):
         """
-        Check if task can be scheduled (immediate dependency is completed if exists)
+        Check if task can be scheduled (immediate dependency is completed OR overdue)
         
-        Key Rule: A task can only be scheduled if its IMMEDIATE dependency is completed.
-        No recursive checking of the full dependency chain is required.
+        Key Rule (MeTTa Logic): A task can be scheduled if its IMMEDIATE dependency is:
+        1. Completed, OR
+        2. Overdue (to prevent blocking dependent tasks when parent tasks become overdue)
+        
+        This follows the MeTTa rules in scheduler.metta which state that overdue 
+        dependencies should not block scheduling of dependent tasks.
         
         Example chain: 1 → 2 → 3 → 4 → 5
-        - Task 2 can be scheduled only when Task 1 is completed
-        - Task 3 can be scheduled only when Task 2 is completed  
-        - Task 5 can be scheduled only when Task 4 is completed
+        - Task 2 can be scheduled when Task 1 is completed OR overdue
+        - Task 3 can be scheduled when Task 2 is completed OR overdue  
+        - Task 5 can be scheduled when Task 4 is completed OR overdue
         - Task 5 does NOT need to check if Tasks 1, 2, or 3 are completed
         """
         # Independent tasks can always be scheduled
@@ -105,20 +119,21 @@ class Task(Document):
         if self.dependency is None:
             return True
             
-        # Check only the immediate dependency status
-        return self.dependency.status == TaskStatus.COMPLETED.value
+        # Check if immediate dependency is completed OR overdue
+        return (self.dependency.status == TaskStatus.COMPLETED.value or 
+                self.dependency.is_overdue())
 
     def can_be_completed(self):
         """
         Check if task can be marked as completed.
         
-        MeTTa Logic Rule: A task can only be completed if its immediate dependency 
-        (if any) is already completed. This prevents completing tasks out of order
-        in dependency chains.
+        MeTTa Logic Rule: A task can be completed if its immediate dependency 
+        (if any) is already completed OR overdue. This allows tasks to be completed
+        even when their dependencies are overdue, preventing cascading delays.
         
         Example chain: 1 → 2 → 3 → 4 → 5
-        - Task 2 can only be completed after Task 1 is completed
-        - Task 3 can only be completed after Task 2 is completed
+        - Task 2 can be completed after Task 1 is completed OR overdue
+        - Task 3 can be completed after Task 2 is completed OR overdue
         - Independent tasks can always be completed
         """
         # Independent tasks can always be completed
@@ -129,8 +144,9 @@ class Task(Document):
         if self.dependency is None:
             return True
             
-        # Check only the immediate dependency status
-        return self.dependency.status == TaskStatus.COMPLETED.value
+        # Check if immediate dependency is completed OR overdue
+        return (self.dependency.status == TaskStatus.COMPLETED.value or 
+                self.dependency.is_overdue())
     
     def get_immediate_dependency(self):
         """Get the immediate dependency task (if any)"""
@@ -176,6 +192,7 @@ class Task(Document):
             'id': str(self.id),
             'title': self.title,
             'description': self.description,
+            'notes': self.notes,
             'dependency': str(self.dependency.id) if self.dependency else None,
             'dependency_title': self.dependency.title if self.dependency else None,
             'deadline': self.deadline.isoformat(),
