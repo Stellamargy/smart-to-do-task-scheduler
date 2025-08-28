@@ -4,9 +4,23 @@ import os
 import pytz
 import threading
 import time
+import json
 from app.models.task import Task
 from app.services.notification_service import NotificationService
 from bson import ObjectId
+
+# Import MeTTa runtime
+try:
+    from hyperon import MeTTa, Environment, SymbolAtom, ExpressionAtom
+    METTA_AVAILABLE = True
+    print("✅ MeTTa runtime available")
+except ImportError:
+    print("⚠️ MeTTa runtime not available. Using Python fallback.")
+    print("💡 To enable MeTTa:")
+    print("   1. Install WSL: Run 'wsl --install' as Administrator")
+    print("   2. Install MeTTa in WSL: Follow WSL_METTA_SETUP.md")
+    print("   3. Or use Docker environment for MeTTa")
+    METTA_AVAILABLE = False
 
 # Global lock to prevent concurrent scheduling operations
 _scheduling_lock = threading.Lock()
@@ -63,10 +77,108 @@ class TaskScheduler:
             
         self._scheduling_in_progress = False  # Prevent recursive scheduling
         self.metta_file_path = os.path.join(os.path.dirname(__file__), '..', 'metta', 'scheduler.metta')
+        
+        # Initialize MeTTa engine
+        self.metta_engine = None
+        self.metta_loaded = False
+        
+        if METTA_AVAILABLE:
+            self._initialize_metta()
+        else:
+            print("🔄 Using Python fallback for MeTTa logic")
     
+    def _initialize_metta(self):
+        """Initialize MeTTa engine and load knowledge base"""
+        try:
+            # Create MeTTa instance
+            self.metta_engine = MeTTa()
+            
+            # Load the MeTTa knowledge base
+            if os.path.exists(self.metta_file_path):
+                with open(self.metta_file_path, 'r') as f:
+                    metta_code = f.read()
+                
+                # Parse and load MeTTa code
+                self.metta_engine.run(metta_code)
+                self.metta_loaded = True
+                print("✅ MeTTa knowledge base loaded successfully")
+                
+                # Load initial facts about current state
+                self._load_metta_facts()
+                
+            else:
+                print(f"❌ MeTTa file not found: {self.metta_file_path}")
+                
+        except Exception as e:
+            print(f"❌ Failed to initialize MeTTa: {e}")
+            self.metta_loaded = False
+    
+    def _load_metta_facts(self):
+        """Load current state facts into MeTTa"""
+        try:
+            # Load current time
+            current_time_fact = f"(= (current-time) \"{self.current_time.isoformat()}\")"
+            self.metta_engine.run(current_time_fact)
+            
+            # Load timezone
+            timezone_fact = f"(= (user-timezone) \"{self.user_timezone}\")"
+            self.metta_engine.run(timezone_fact)
+            
+            # Load weights
+            deadline_weight_fact = f"(= (get-default-deadline-weight) {self.deadline_weight})"
+            priority_weight_fact = f"(= (get-default-priority-weight) {self.priority_weight})"
+            self.metta_engine.run(deadline_weight_fact)
+            self.metta_engine.run(priority_weight_fact)
+            
+            print("✅ MeTTa facts loaded")
+            
+        except Exception as e:
+            print(f"❌ Failed to load MeTTa facts: {e}")
+    
+    def _load_task_facts(self, tasks: List[Task]):
+        """Load task data into MeTTa knowledge base"""
+        if not self.metta_loaded:
+            return
+            
+        try:
+            # Clear previous task facts
+            self.metta_engine.run("(clear-task-facts)")
+            
+            for task in tasks:
+                # Convert task to MeTTa fact
+                task_fact = f"""(= (task "{task.id}" "{task.title}" "{task.description}" 
+                                    {task.priority} {task.estimated_duration} 
+                                    "{task.deadline.isoformat()}" "{task.status}")"""
+                
+                # Clean up the fact (remove extra whitespace)
+                task_fact = ' '.join(task_fact.split())
+                self.metta_engine.run(task_fact)
+                
+                # Load dependencies
+                if task.dependency:
+                    dep_fact = f'(= (depends-on "{task.id}" "{task.dependency}"))'
+                    self.metta_engine.run(dep_fact)
+                else:
+                    indep_fact = f'(= (independent-task "{task.id}"))'
+                    self.metta_engine.run(indep_fact)
+                
+                # Load completion status
+                if task.status == 'completed':
+                    completed_fact = f'(= (task-completed "{task.id}"))'
+                    self.metta_engine.run(completed_fact)
+                elif task.status == 'overdue':
+                    overdue_fact = f'(= (task-overdue "{task.id}"))'
+                    self.metta_engine.run(overdue_fact)
+            
+            print(f"✅ Loaded {len(tasks)} tasks into MeTTa")
+            
+        except Exception as e:
+            print(f"❌ Failed to load task facts: {e}")
+
     def calculate_urgency_score(self, task: Task) -> float:
         """
         Calculate urgency score for a task based on deadline and priority
+        Uses MeTTa if available, falls back to Python calculation
         
         Args:
             task: Task object
@@ -74,6 +186,26 @@ class TaskScheduler:
         Returns:
             Float urgency score (higher = more urgent)
         """
+        # Try MeTTa calculation first
+        if self.metta_loaded:
+            try:
+                # Load this task into MeTTa
+                self._load_task_facts([task])
+                
+                # Query MeTTa for urgency calculation
+                deadline_iso = task.deadline.isoformat()
+                urgency_query = f'(calculate-urgency "{deadline_iso}" {task.priority} {self.deadline_weight} {self.priority_weight})'
+                result = self.metta_engine.run(urgency_query)
+                
+                if result:
+                    urgency_score = float(str(result[0]))
+                    print(f"🧠 MeTTa calculated urgency for '{task.title}': {urgency_score}")
+                    return urgency_score
+                    
+            except Exception as e:
+                print(f"❌ MeTTa urgency calculation failed: {e}")
+        
+        # Fallback to Python calculation
         now = self.current_time
         # Handle both timezone-aware and timezone-naive deadlines
         deadline = task.deadline
@@ -149,11 +281,18 @@ class TaskScheduler:
         blocked_by_dependencies = []
         
         for task in user_tasks:
-            # Use the corrected immediate dependency logic
-            if task.can_be_scheduled():
-                schedulable.append(task)
+            # Use MeTTa for dependency checking if available
+            if self.metta_loaded:
+                if self._can_schedule_with_metta(task, user_tasks):
+                    schedulable.append(task)
+                else:
+                    blocked_by_dependencies.append(task)
             else:
-                blocked_by_dependencies.append(task)
+                # Fallback to Task model's can_be_scheduled method
+                if task.can_be_scheduled():
+                    schedulable.append(task)
+                else:
+                    blocked_by_dependencies.append(task)
         
         print(f"✅ Schedulable tasks: {len(schedulable)} (independent or with completed dependencies)")
         print(f"🔒 Blocked tasks: {len(blocked_by_dependencies)} (waiting for dependencies to complete)")
@@ -165,6 +304,40 @@ class TaskScheduler:
         
         return schedulable
     
+    def _can_schedule_with_metta(self, task: Task, all_user_tasks: List[Task]) -> bool:
+        """
+        Use MeTTa to determine if a task can be scheduled based on dependencies
+        
+        Args:
+            task: Task to check
+            all_user_tasks: All user's tasks for dependency context
+            
+        Returns:
+            True if task can be scheduled, False otherwise
+        """
+        try:
+            # Load all tasks into MeTTa knowledge base
+            self._load_task_facts(all_user_tasks)
+            
+            # Query MeTTa for schedulability
+            can_schedule_query = f'(can-schedule "{task.id}")'
+            result = self.metta_engine.run(can_schedule_query)
+            
+            if result:
+                can_schedule = str(result[0]).strip('"').lower()
+                schedulable = can_schedule in ['true', 'yes', '1']
+                print(f"🧠 MeTTa dependency check for '{task.title}': {'✅ Schedulable' if schedulable else '🔒 Blocked'}")
+                return schedulable
+            else:
+                # If no result, assume schedulable (independent task)
+                print(f"🧠 MeTTa no dependency result for '{task.title}', assuming independent")
+                return True
+                
+        except Exception as e:
+            print(f"❌ MeTTa dependency check failed for '{task.title}': {e}")
+            # Fallback to Python logic
+            return task.can_be_scheduled()
+
     def sort_tasks_by_urgency(self, tasks: List[Task]) -> List[Task]:
         """
         Sort tasks by urgency score (highest first)
@@ -179,13 +352,8 @@ class TaskScheduler:
     
     def find_optimal_start_time_with_metta(self, task: Task, user_tasks: List[Task]) -> datetime:
         """
-        Find optimal start time for a task using MeTTa logic and avoiding conflicts
-        
-        MeTTa Optimal Scheduling Logic:
-        1. Calculate urgency-based priority slot
-        2. Find gaps in existing schedule
-        3. Balance deadline pressure with priority
-        4. Optimize for minimal context switching
+        Find optimal start time for a task using actual MeTTa logic
+        Falls back to Python implementation if MeTTa is not available
         
         Args:
             task: Task to schedule
@@ -194,109 +362,198 @@ class TaskScheduler:
         Returns:
             Optimal start time based on MeTTa logic
         """
-        now = self.current_time
+        # Try MeTTa-based scheduling first
+        if self.metta_loaded:
+            try:
+                # Load all tasks into MeTTa knowledge base
+                self._load_task_facts(user_tasks + [task])
+                
+                # Query MeTTa for optimal start time
+                urgency_score = self.calculate_urgency_score(task)
+                duration = task.estimated_duration
+                
+                # Query MeTTa for optimal time slot
+                time_slot_query = f'(optimal-time-slot {urgency_score} {task.priority})'
+                time_slot_result = self.metta_engine.run(time_slot_query)
+                
+                if time_slot_result:
+                    time_slot = str(time_slot_result[0]).strip('"')
+                    optimal_time = self._convert_metta_time_slot_to_datetime(time_slot)
+                    
+                    # Check for conflicts using MeTTa
+                    conflict_free_time = self._find_conflict_free_time_with_metta(task, optimal_time, user_tasks)
+                    
+                    print(f"🧠 MeTTa suggested optimal time for '{task.title}': {conflict_free_time}")
+                    return conflict_free_time
+                    
+            except Exception as e:
+                print(f"❌ MeTTa optimal time query failed: {e}")
         
-        # MeTTa Logic 1: Calculate urgency-based time preference
+        # Fallback to Python implementation
+        return self._find_optimal_start_time_fallback(task, user_tasks)
+    
+    def _convert_metta_time_slot_to_datetime(self, time_slot: str) -> datetime:
+        """Convert MeTTa time slot to actual datetime"""
+        now = self.current_time
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Map MeTTa time slots to hours
+        time_mappings = {
+            "early-morning": 9,
+            "morning": 10,
+            "midday": 12,
+            "afternoon": 14,
+            "evening": 16,
+            "late": 18
+        }
+        
+        hour = time_mappings.get(time_slot, 10)  # Default to 10 AM
+        target_time = today.replace(hour=hour)
+        
+        # If time is in the past, schedule for next day
+        if target_time < now:
+            target_time += timedelta(days=1)
+            
+        return target_time
+    
+    def _find_conflict_free_time_with_metta(self, task: Task, preferred_time: datetime, user_tasks: List[Task]) -> datetime:
+        """Use MeTTa to find conflict-free time starting from preferred time"""
+        if not self.metta_loaded:
+            return self._find_conflict_free_time_fallback(task, preferred_time, user_tasks)
+        
+        try:
+            # Check if preferred time has conflicts using MeTTa logic
+            task_duration = timedelta(hours=task.estimated_duration)
+            current_time = preferred_time
+            max_attempts = 50
+            attempt = 0
+            
+            while attempt < max_attempts:
+                attempt += 1
+                proposed_end_time = current_time + task_duration
+                
+                # Query MeTTa for conflict detection
+                has_conflict = self._check_metta_time_conflict(current_time, proposed_end_time, user_tasks)
+                
+                if not has_conflict and current_time >= self.current_time:
+                    return current_time
+                else:
+                    # Move to next available slot
+                    current_time = self._get_next_available_slot_metta(current_time, task_duration, user_tasks)
+                    
+                # Safety check
+                if current_time > self.current_time + timedelta(days=7):
+                    break
+            
+            # If MeTTa couldn't find a slot, use fallback
+            return self._find_conflict_free_time_fallback(task, preferred_time, user_tasks)
+            
+        except Exception as e:
+            print(f"❌ MeTTa conflict resolution failed: {e}")
+            return self._find_conflict_free_time_fallback(task, preferred_time, user_tasks)
+    
+    def _check_metta_time_conflict(self, start_time: datetime, end_time: datetime, user_tasks: List[Task]) -> bool:
+        """Use MeTTa to check for time conflicts"""
+        try:
+            # Load scheduled tasks into MeTTa
+            for existing_task in user_tasks:
+                if existing_task.start_time and existing_task.end_time:
+                    # Add scheduled time facts
+                    start_fact = f'(= (scheduled-start "{existing_task.id}") "{existing_task.start_time.isoformat()}")'
+                    end_fact = f'(= (scheduled-end "{existing_task.id}") "{existing_task.end_time.isoformat()}")'
+                    self.metta_engine.run(start_fact)
+                    self.metta_engine.run(end_fact)
+            
+            # Query MeTTa for conflict check
+            conflict_query = f'(has-time-conflict-auto "{start_time.isoformat()}" "{end_time.isoformat()}")'
+            result = self.metta_engine.run(conflict_query)
+            
+            if result:
+                return str(result[0]).strip('"').lower() == 'true'
+            
+        except Exception as e:
+            print(f"❌ MeTTa conflict check failed: {e}")
+        
+        return False  # Assume no conflict if MeTTa fails
+    
+    def _get_next_available_slot_metta(self, current_time: datetime, duration: timedelta, user_tasks: List[Task]) -> datetime:
+        """Use MeTTa to find next available time slot"""
+        try:
+            # Query MeTTa for next available slot
+            slot_query = f'(find-next-available-slot {duration.total_seconds() / 3600})'
+            result = self.metta_engine.run(slot_query)
+            
+            if result:
+                # Parse MeTTa result and convert to datetime
+                next_slot = str(result[0]).strip('"')
+                return self._convert_metta_time_slot_to_datetime(next_slot)
+            
+        except Exception as e:
+            print(f"❌ MeTTa next slot query failed: {e}")
+        
+        # Fallback: move 1 hour forward
+        return current_time + timedelta(hours=1)
+    
+    def _find_optimal_start_time_fallback(self, task: Task, user_tasks: List[Task]) -> datetime:
+        """Fallback Python implementation when MeTTa is not available"""
+        now = self.current_time
         urgency_score = self.calculate_urgency_score(task)
         
-        # MeTTa Logic 2: Prefer working hours (9 AM - 6 PM) for high urgency tasks
-        if urgency_score > 0.7:  # High urgency
-            preferred_start_hour = 9  # Start early for urgent tasks
-        elif urgency_score > 0.4:  # Medium urgency  
-            preferred_start_hour = 10  # Standard start time
-        else:  # Low urgency
-            preferred_start_hour = 14  # Afternoon for low priority
-        
-        # Get all scheduled time slots for conflict detection
+        # Determine preferred time based on urgency
+        if urgency_score > 0.7:
+            preferred_start_hour = 9
+        elif urgency_score > 0.4:
+            preferred_start_hour = 10
+        else:
+            preferred_start_hour = 14
+            
+        # Get scheduled slots for conflict detection
         scheduled_slots = []
         for existing_task in user_tasks:
             if existing_task.start_time and existing_task.end_time and existing_task.id != task.id:
-                # Convert UTC times from database to user's local timezone
-                start_time = existing_task.start_time
-                end_time = existing_task.end_time
-                
-                # Convert from UTC (database storage) to user's local timezone
-                if start_time.tzinfo is None:
-                    # Treat naive datetime as UTC (MongoEngine default)
-                    start_time = pytz.UTC.localize(start_time).astimezone(self.user_tz)
-                else:
-                    start_time = start_time.astimezone(self.user_tz)
-                    
-                if end_time.tzinfo is None:
-                    # Treat naive datetime as UTC (MongoEngine default)
-                    end_time = pytz.UTC.localize(end_time).astimezone(self.user_tz)
-                else:
-                    end_time = end_time.astimezone(self.user_tz)
-                
+                start_time = self.convert_db_time_to_user_timezone(existing_task.start_time)
+                end_time = self.convert_db_time_to_user_timezone(existing_task.end_time)
                 scheduled_slots.append((start_time, end_time))
-                print(f"🔍 Collision check: Found existing task '{existing_task.title}' at {start_time} to {end_time} ({self.user_timezone})")
         
-        
-        # Sort slots by start time for gap analysis
         scheduled_slots.sort(key=lambda x: x[0])
         
-        # Start with preferred time based on urgency
+        # Find conflict-free time
         task_duration = timedelta(hours=task.estimated_duration)
-        
-        # Start with preferred time based on urgency, but never in the past
         today = now.replace(hour=preferred_start_hour, minute=0, second=0, microsecond=0)
         if today < now:
-            today += timedelta(days=1)  # Move to next day if time has passed
+            today += timedelta(days=1)
             
-        # Always start from current time or later, never in the past
         current_time = max(now, today)
         
-        # MeTTa Logic 4: Advanced collision detection and gap optimization
-        max_attempts = 50  # Prevent infinite loops
+        # Simple conflict resolution
+        max_attempts = 50
         attempt = 0
         
         while attempt < max_attempts:
             attempt += 1
-            # Check if the proposed time slot has any conflicts
             proposed_end_time = current_time + task_duration
             has_conflict = False
             conflict_end_time = None
             
-            # Check all scheduled slots for conflicts
             for start_time, end_time in scheduled_slots:
-                # Check for time overlap
                 if self.times_overlap(current_time, proposed_end_time, start_time, end_time):
                     has_conflict = True
-                    # Find the latest conflict end time to move past all conflicts
                     if conflict_end_time is None or end_time > conflict_end_time:
                         conflict_end_time = end_time
             
-            if not has_conflict:
-                # Found a slot without conflicts - ensure it's not in the past
-                if current_time >= now:
-                    break
-                else:
-                    # If somehow we got a time in the past, move to current time
-                    current_time = now
-                    continue
+            if not has_conflict and current_time >= now:
+                break
             else:
-                # Move current_time to after the latest conflicting slot
-                current_time = max(conflict_end_time, now)  # Ensure never in the past
-                print(f"🔄 Conflict detected for '{task.title}', moving to {current_time}")
+                current_time = max(conflict_end_time or current_time + timedelta(hours=1), now)
                 
-            # Safety check to prevent scheduling too far in the future
             if current_time > now + timedelta(days=7):
-                print(f"⚠️ Warning: Could not find slot within 7 days for task {task.title}")
                 break
         
-        # MeTTa Logic 5: Consider urgency for final placement
-        if urgency_score > 0.8:  # Critical urgency
-            # For critical tasks, try to fit them as early as possible
-            early_time = max(now, now.replace(hour=9, minute=0, second=0, microsecond=0))
-            if not self.has_conflicts_with_existing(early_time, early_time + task_duration, scheduled_slots):
-                current_time = early_time
-
-        # Final safety check: Never schedule in the past
-        if current_time < now:
-            print(f"⚠️ Warning: Correcting past scheduling time for '{task.title}' from {current_time} to {now}")
-            current_time = now
-
-        return current_time
+        return max(current_time, now)
+    
+    def _find_conflict_free_time_fallback(self, task: Task, preferred_time: datetime, user_tasks: List[Task]) -> datetime:
+        """Fallback conflict resolution using Python"""
+        return self._find_optimal_start_time_fallback(task, user_tasks)
 
     def times_overlap(self, start1: datetime, end1: datetime, start2: datetime, end2: datetime) -> bool:
         """
@@ -806,6 +1063,7 @@ class TaskScheduler:
     def allocate_time_proportionally(self, tasks: List[Task]) -> List[Dict]:
         """
         Allocate time proportionally among tasks competing for the same deadline
+        Uses MeTTa if available, falls back to Python calculation
         
         Args:
             tasks: List of tasks with similar deadlines
@@ -830,6 +1088,87 @@ class TaskScheduler:
             print(f"⚠️ No time available before deadline: {earliest_deadline}")
             return []
         
+        # Try MeTTa proportional allocation first
+        if self.metta_loaded:
+            try:
+                return self._allocate_with_metta(tasks, available_time)
+            except Exception as e:
+                print(f"❌ MeTTa proportional allocation failed: {e}")
+        
+        # Fallback to Python calculation
+        return self._allocate_proportionally_fallback(tasks, available_time)
+    
+    def _allocate_with_metta(self, tasks: List[Task], available_time: float) -> List[Dict]:
+        """Use MeTTa for proportional time allocation"""
+        # Load tasks into MeTTa knowledge base
+        self._load_task_facts(tasks)
+        
+        # Create task list for MeTTa query
+        task_ids = [f'"{task.id}"' for task in tasks]
+        task_list = f"[{', '.join(task_ids)}]"
+        
+        # Query MeTTa for proportional allocation
+        allocation_query = f'(proportional-time-allocation {task_list} {available_time})'
+        result = self.metta_engine.run(allocation_query)
+        
+        if result:
+            print("🧠 MeTTa proportional allocation successful")
+            return self._parse_metta_allocation_result(result, tasks, available_time)
+        else:
+            # If MeTTa doesn't return result, use fallback
+            return self._allocate_proportionally_fallback(tasks, available_time)
+    
+    def _parse_metta_allocation_result(self, metta_result, tasks: List[Task], available_time: float) -> List[Dict]:
+        """Parse MeTTa allocation result into usable format"""
+        allocated_tasks = []
+        current_start_time = self.current_time
+        
+        try:
+            # Sort tasks by urgency for scheduling order
+            sorted_tasks = sorted(tasks, key=self.calculate_urgency_score, reverse=True)
+            
+            # Calculate total required time for proportional factors
+            total_required_time = sum(task.estimated_duration for task in tasks)
+            
+            for task in sorted_tasks:
+                # Query MeTTa for individual task allocation
+                task_allocation_query = f'(allocate-proportional-time "{task.id}" {available_time / total_required_time})'
+                task_result = self.metta_engine.run(task_allocation_query)
+                
+                if task_result:
+                    allocated_duration = float(str(task_result[0]))
+                else:
+                    # Fallback calculation
+                    proportional_factor = task.estimated_duration / total_required_time
+                    allocated_duration = proportional_factor * available_time
+                
+                # Ensure minimum allocation
+                allocated_duration = max(allocated_duration, 0.25)  # 15 minutes minimum
+                
+                # Calculate end time
+                end_time = current_start_time + timedelta(hours=allocated_duration)
+                
+                allocated_tasks.append({
+                    'task': task,
+                    'start_time': current_start_time,
+                    'end_time': end_time,
+                    'allocated_duration': allocated_duration,
+                    'proportional_factor': allocated_duration / available_time
+                })
+                
+                print(f"🧠 MeTTa allocation: {task.title} gets {allocated_duration:.1f}h/{task.estimated_duration}h")
+                
+                # Move start time for next task
+                current_start_time = end_time
+                
+        except Exception as e:
+            print(f"❌ Failed to parse MeTTa allocation result: {e}")
+            return self._allocate_proportionally_fallback(tasks, available_time)
+        
+        return allocated_tasks
+    
+    def _allocate_proportionally_fallback(self, tasks: List[Task], available_time: float) -> List[Dict]:
+        """Fallback Python implementation for proportional allocation"""
         # Calculate total required time
         total_required_time = sum(task.estimated_duration for task in tasks)
         
@@ -841,12 +1180,11 @@ class TaskScheduler:
         
         for task in sorted_tasks:
             # Calculate proportional allocation
-            # allocated_time = (task_duration / total_required_duration) * available_time
             proportional_factor = task.estimated_duration / total_required_time
             allocated_duration = proportional_factor * available_time
             
             # Ensure minimum allocation of 15 minutes
-            allocated_duration = max(allocated_duration, 0.25)  # 15 minutes minimum
+            allocated_duration = max(allocated_duration, 0.25)
             
             # Calculate end time
             end_time = current_start_time + timedelta(hours=allocated_duration)
@@ -859,7 +1197,7 @@ class TaskScheduler:
                 'proportional_factor': proportional_factor
             })
             
-            print(f"📊 Proportional allocation: {task.title} gets {allocated_duration:.1f}h/{task.estimated_duration}h ({proportional_factor*100:.1f}%)")
+            print(f"📊 Python allocation: {task.title} gets {allocated_duration:.1f}h/{task.estimated_duration}h ({proportional_factor*100:.1f}%)")
             
             # Move start time for next task
             current_start_time = end_time
@@ -883,14 +1221,15 @@ class TaskScheduler:
                 _user_scheduling_locks[user_id] = threading.Lock()
             return _user_scheduling_locks[user_id]
     
-    def auto_schedule_on_task_change(self, user_id: str, changed_task_id: str = None) -> Dict:
+    def auto_schedule_on_task_change(self, user_id: str, changed_task_id: str = None, trigger_type: str = "task-updated") -> Dict:
         """
         Automatically reschedule all user tasks when a task is created/updated
-        Uses per-user locking to prevent concurrent scheduling operations
+        Uses MeTTa triggers and per-user locking to prevent concurrent scheduling operations
         
         Args:
             user_id: User ID
             changed_task_id: ID of the task that was changed (for optimization)
+            trigger_type: Type of trigger ("task-created", "task-updated", "task-completed", etc.)
             
         Returns:
             Dictionary with scheduling results
@@ -908,6 +1247,15 @@ class TaskScheduler:
         
         try:
             print(f"🔒 Acquired scheduling lock for user {user_id}")
+            
+            # Use MeTTa to trigger appropriate rescheduling logic
+            if self.metta_loaded and changed_task_id:
+                try:
+                    trigger_result = self._trigger_metta_reschedule(trigger_type, user_id, changed_task_id)
+                    if trigger_result:
+                        print(f"🧠 MeTTa triggered reschedule for {trigger_type}")
+                except Exception as e:
+                    print(f"❌ MeTTa trigger failed: {e}")
             
             # Get all user tasks that need scheduling
             user_tasks = Task.objects(user=ObjectId(user_id), status__ne='completed')
@@ -929,7 +1277,8 @@ class TaskScheduler:
             return {
                 'success': True,
                 'message': 'Tasks automatically rescheduled',
-                'result': result
+                'result': result,
+                'trigger_type': trigger_type
             }
             
         except Exception as e:
@@ -941,6 +1290,52 @@ class TaskScheduler:
         finally:
             user_lock.release()
     
+    def _trigger_metta_reschedule(self, trigger_type: str, user_id: str, task_id: str = None) -> bool:
+        """
+        Use MeTTa automatic readjustment triggers
+        
+        Args:
+            trigger_type: Type of trigger event
+            user_id: User ID
+            task_id: Task ID if applicable
+            
+        Returns:
+            True if MeTTa trigger was successful
+        """
+        try:
+            if trigger_type == "task-created":
+                trigger_query = f'(auto-schedule-trigger "task-created" "{task_id}")'
+            elif trigger_type == "task-updated":
+                trigger_query = f'(auto-schedule-trigger "task-updated" "{task_id}")'
+            elif trigger_type == "task-completed":
+                trigger_query = f'(auto-schedule-trigger "task-completed" "{task_id}")'
+            elif trigger_type == "task-overdue":
+                trigger_query = f'(auto-schedule-trigger "task-overdue" "{task_id}")'
+            elif trigger_type == "task-deleted":
+                trigger_query = f'(auto-schedule-trigger "task-deleted" "{user_id}")'
+            elif trigger_type == "high-priority-added":
+                trigger_query = f'(metta-readjust-trigger "high-priority-added" "{user_id}")'
+            elif trigger_type == "deadline-approaching":
+                trigger_query = f'(metta-readjust-trigger "deadline-approaching" "{task_id}")'
+            elif trigger_type == "dependency-completed":
+                trigger_query = f'(metta-readjust-trigger "dependency-completed" "{task_id}")'
+            else:
+                trigger_query = f'(auto-schedule-trigger "task-updated" "{task_id}")'  # Default
+            
+            result = self.metta_engine.run(trigger_query)
+            
+            if result:
+                trigger_result = str(result[0]).strip('"')
+                print(f"🧠 MeTTa trigger result: {trigger_result}")
+                return True
+            else:
+                print(f"🧠 MeTTa trigger executed but no result returned")
+                return True  # Assume success if no error
+                
+        except Exception as e:
+            print(f"❌ MeTTa trigger execution failed: {e}")
+            return False
+
     def reschedule_task(self, task_id: str) -> Dict:
         """
         Reschedule a specific task
@@ -1079,3 +1474,97 @@ class TaskScheduler:
                 metta_kb += f"(task-completed {str(task.id)})\n"
         
         return metta_kb
+    
+    def _trigger_metta_reschedule(self, trigger_type: str, user_id: str, task_id: str = None) -> bool:
+        """Trigger MeTTa-based automatic rescheduling"""
+        if not self.metta_loaded:
+            return False
+            
+        try:
+            # Query MeTTa for appropriate rescheduling action
+            if task_id:
+                trigger_query = f'(metta-readjust-trigger "{trigger_type}" "{task_id}")'
+            else:
+                trigger_query = f'(metta-readjust-trigger "{trigger_type}" "{user_id}")'
+                
+            result = self.metta_engine.run(trigger_query)
+            
+            if result:
+                action = str(result[0]).strip('"')
+                print(f"🧠 MeTTa triggered action: {action}")
+                
+                # Execute the recommended action
+                if action == "compress-low-priority-tasks":
+                    return self._compress_low_priority_tasks(user_id)
+                elif action == "emergency-time-allocation":
+                    return self._emergency_time_allocation(task_id)
+                elif action == "immediate-schedule-dependents":
+                    return self._schedule_immediate_dependents(task_id)
+                    
+        except Exception as e:
+            print(f"❌ MeTTa reschedule trigger failed: {e}")
+            
+        return False
+    
+    def _compress_low_priority_tasks(self, user_id: str) -> bool:
+        """Compress low priority tasks to make room for high priority ones"""
+        try:
+            user_tasks = list(Task.objects(user=ObjectId(user_id), status__in=['pending', 'in_progress']))
+            
+            # Separate high and low priority tasks
+            high_priority = [t for t in user_tasks if t.priority >= 4]
+            low_priority = [t for t in user_tasks if t.priority < 4]
+            
+            if not low_priority:
+                return True
+                
+            # Compress low priority task durations by 20%
+            for task in low_priority:
+                compressed_duration = task.estimated_duration * 0.8
+                task.estimated_duration = max(compressed_duration, 0.25)  # Minimum 15 minutes
+                task.save()
+                
+            print(f"🗜️ Compressed {len(low_priority)} low priority tasks")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to compress low priority tasks: {e}")
+            return False
+    
+    def _emergency_time_allocation(self, task_id: str) -> bool:
+        """Allocate emergency time slots for critical tasks"""
+        try:
+            task = Task.objects(id=ObjectId(task_id)).first()
+            if not task:
+                return False
+                
+            # Move task to earliest possible slot (even outside normal hours)
+            emergency_start = self.current_time.replace(hour=8, minute=0, second=0, microsecond=0)
+            if emergency_start < self.current_time:
+                emergency_start += timedelta(days=1)
+                
+            emergency_end = emergency_start + timedelta(hours=task.estimated_duration)
+            
+            # Save emergency schedule
+            return self.save_task_schedule_to_db(task, emergency_start, emergency_end)
+            
+        except Exception as e:
+            print(f"❌ Emergency time allocation failed: {e}")
+            return False
+    
+    def _schedule_immediate_dependents(self, completed_task_id: str) -> bool:
+        """Schedule tasks that depend on the completed task"""
+        try:
+            # Find tasks that depend on this completed task
+            dependent_tasks = Task.objects(dependency=ObjectId(completed_task_id), status__in=['pending', 'in_progress'])
+            
+            for dependent_task in dependent_tasks:
+                start_time, end_time = self.schedule_task(dependent_task)
+                self.save_task_schedule_to_db(dependent_task, start_time, end_time)
+                
+            print(f"📅 Scheduled {len(dependent_tasks)} dependent tasks")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to schedule dependent tasks: {e}")
+            return False

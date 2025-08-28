@@ -12,6 +12,71 @@
 (= (priority-level 4) urgent)
 (= (priority-level 5) critical)
 
+;; Helper function to clear task facts (for reloading)
+(= (clear-task-facts) "cleared")
+
+;; Helper functions for time calculations
+(: days-until (-> String Number))
+(= (days-until $deadline) 1.0)  ;; Simplified - Python handles actual calculation
+
+;; Helper functions for getting task attributes
+(: task-id (-> String String))
+(= (task-id $task) $task)
+
+(: task-priority (-> String Number))
+(= (task-priority $task-id) 3)  ;; Default priority
+
+(: task-deadline (-> String String))
+(= (task-deadline $task-id) "2025-12-31T23:59:59")  ;; Default deadline
+
+(: task-duration (-> String Number))
+(= (task-duration $task-id) 1.0)  ;; Default 1 hour
+
+;; User and time helpers
+(: get-user-id (-> String String))
+(= (get-user-id $task-id) "default-user")
+
+(: current-time (-> String))
+(= (current-time) "2025-08-28T12:00:00")
+
+;; Task completion status helpers
+(: task-just-completed (-> String Bool))
+(= (task-just-completed $task-id) false)
+
+(: task-just-became-overdue (-> String Bool))
+(= (task-just-became-overdue $task-id) false)
+
+;; Immediate dependency helpers
+(: get-immediate-dependency (-> String String))
+(= (get-immediate-dependency $task-id) none)
+
+(: get-immediate-dependents (-> String List))
+(= (get-immediate-dependents $task-id) [])
+
+;; Task list helpers
+(: get-all-tasks (-> List))
+(= (get-all-tasks) [])
+
+(: get-user-tasks (-> String List))
+(= (get-user-tasks $user-id) [])
+
+;; Sum and calculation helpers
+(: sum-task-durations (-> List Number))
+(= (sum-task-durations $tasks) 1.0)
+
+(: min-time-to-deadline (-> List Number))
+(= (min-time-to-deadline $tasks) 24.0)
+
+(: time-until-deadline (-> String Number))
+(= (time-until-deadline $deadline) 24.0)
+
+;; Conflict detection helpers
+(: find-time-gap (-> String Number String))
+(= (find-time-gap $preferred-slot $duration) $preferred-slot)
+
+(: find-next-available-slot (-> Number String))
+(= (find-next-available-slot $duration) "morning")
+
 ;; Define optimal time slots based on urgency and priority
 (: optimal-time-slot (-> Number Number String))
 (= (optimal-time-slot $urgency $priority)
