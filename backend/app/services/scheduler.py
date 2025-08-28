@@ -15,11 +15,7 @@ try:
     METTA_AVAILABLE = True
     print("✅ MeTTa runtime available")
 except ImportError:
-    print("⚠️ MeTTa runtime not available. Using Python fallback.")
     print("💡 To enable MeTTa:")
-    print("   1. Install WSL: Run 'wsl --install' as Administrator")
-    print("   2. Install MeTTa in WSL: Follow WSL_METTA_SETUP.md")
-    print("   3. Or use Docker environment for MeTTa")
     METTA_AVAILABLE = False
 
 # Global lock to prevent concurrent scheduling operations
